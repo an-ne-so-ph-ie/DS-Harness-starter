@@ -9,7 +9,7 @@ import dsh
 
 MODEL = os.environ.get('DSH_MODEL', dsh.DEFAULT_MODEL)
 MAX_ROUNDS = 4
-SYSTEM = (
+SYSTEM_calc = (
     "Solve the problem step by step. You have a calculator: to use it, write\n"
     '<call tool="calculator">EXPRESSION</call>\n'
     "and stop; the result comes back in the next message. EXPRESSION is Python arithmetic: "
@@ -18,12 +18,18 @@ SYSTEM = (
     "one call at a time. When you know the final answer, write a last line of the form "
     "ANSWER: <number>, rounded as the question asks."
 )
-DEMO = [
+DEMO_calc = [
     {'role': 'user', 'content': 'A jacket costs 80 euros. What does it cost after a 15% discount, then a 20% tax? Round to 2 decimals.'},
     {'role': 'assistant', 'content': 'The discounted price is 80 × (1 − 0.15), then the tax multiplies it by 1.20.\n<call tool="calculator">80 * (1 - 0.15) * 1.20</call>'},
     {'role': 'user', 'content': 'Result: 81.6'},
     {'role': 'assistant', 'content': 'The final price is 81.6 euros.\nANSWER: 81.6'},
 ]
+
+SYSTEM_fit = ()
+DEMO_fit = []
+
+SYSTEM_table = ()
+DEMO_table = []
 
 
 def read_files(files, objective=''):
@@ -275,54 +281,94 @@ def observe(call):
     return f'Result: {value:.10g}'
 
 
+def route_tasks(tasks):
+    calc_files = []
+    fit_files = []
+    table_files = []
+    for i, task in enumerate(tasks):
+        files = task['files']
+        if not files:
+            calc_files.append(i)
+        elif 'train.csv' in [os.path.basename(str(name)) for name in files]:
+            fit_files.append(i)
+        else:
+            table_files.append(i)
+    return calc_files, fit_files, table_files
+
+
+def check_infinite(tasks, indices, out):
+    remaining = []
+    for i in indices:
+        task = tasks[i]
+        try:
+            answer = float(solve_data(task))
+            if math.isfinite(answer):
+                out[i] = {'id': task['id'], 'answer': answer}
+                continue
+        except Exception:
+            pass
+        remaining.append(i)
+    return remaining
+
+
 class Agent:
     def __init__(self):
-        self.llm = None
+        self.llm_calc = None
+        self.llm_fit = None
+        self.llm_table = None
+        self.out = []
 
     def solve(self, tasks, seconds=40.0):
         clock = dsh.Clock(seconds)
-        out = [None] * len(tasks)
-        remaining = []
-        for i, task in enumerate(tasks):
-            if task['files']:
-                try:
-                    answer = float(solve_data(task))
-                    if math.isfinite(answer):
-                        out[i] = {'id': task['id'], 'answer': answer}
+        self.out = [None] * len(tasks)
+
+        calc_files, fit_files, table_files = route_tasks(tasks)
+        remaining_fit = check_infinite(tasks, fit_files, self.out)
+        remaining_table = check_infinite(tasks, table_files, self.out)
+
+        def fit_llm(files):
+            # todo
+            return
+
+        def table_llm(files):
+            # todo
+            return 
+
+        def calc_llm(indices):
+            self.llm_calc = self.llm_calc or dsh.load_llm(MODEL)
+            convs = []
+            for i in indices:
+                task = tasks[i]
+                text = task['objective']
+                if task['files']:
+                    text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
+                convs.append([{'role': 'system', 'content': SYSTEM_calc}] + DEMO_calc + [{'role': 'user', 'content': text}])
+            final = [''] * len(indices)
+            active = list(range(len(indices)))
+            for _ in range(MAX_ROUNDS):
+                if not active or clock.left() < 3:
+                    break
+                replies = self.llm_calc.chat([convs[j] for j in active], max_new_tokens=384,
+                                             max_time=clock.left() - 1, stop=['</call>'])
+                next_active = []
+                for j, reply in zip(active, replies):
+                    final[j] = reply
+                    call = dsh.parse_tool_call(reply)
+                    if call is None:
                         continue
-                except Exception:
-                    pass
-            remaining.append(i)
-        if not remaining:
-            return out
-        self.llm = self.llm or dsh.load_llm(MODEL)
-        convs = []
-        for i in remaining:
-            task = tasks[i]
-            text = task['objective']
-            if task['files']:
-                text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
-            convs.append([{'role': 'system', 'content': SYSTEM}] + DEMO + [{'role': 'user', 'content': text}])
-        final = [''] * len(remaining)
-        active = list(range(len(remaining)))
-        for _ in range(MAX_ROUNDS):
-            if not active or clock.left() < 3:
-                break
-            replies = self.llm.chat([convs[j] for j in active], max_new_tokens=384,
-                                    max_time=clock.left() - 1, stop=['</call>'])
-            next_active = []
-            for j, reply in zip(active, replies):
-                final[j] = reply
-                call = dsh.parse_tool_call(reply)
-                if call is None:
-                    continue
-                convs[j].append({'role': 'assistant', 'content': reply})
-                convs[j].append({'role': 'user', 'content': observe(call)})
-                next_active.append(j)
-            active = next_active
-        for j, i in enumerate(remaining):
-            answer = dsh.tagged_number(final[j])
-            if answer is None:
-                answer = dsh.last_number(final[j])
-            out[i] = {'id': tasks[i]['id'], 'answer': answer if answer is not None else 0}
-        return out
+                    convs[j].append({'role': 'assistant', 'content': reply})
+                    convs[j].append({'role': 'user', 'content': observe(call)})
+                    next_active.append(j)
+                active = next_active
+            answers = []
+            for j, i in enumerate(indices):
+                answer = dsh.tagged_number(final[j])
+                if answer is None:
+                    answer = dsh.last_number(final[j])
+                self.out[i] = {'id': tasks[i]['id'], 'answer': answer if answer is not None else 0}
+
+        calc_llm(calc_files)
+        fit_llm(remaining_fit)
+        table_llm(remaining_table)
+
+        return self.out
