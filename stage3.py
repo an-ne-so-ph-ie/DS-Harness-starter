@@ -289,7 +289,7 @@ def route_tasks(tasks):
         files = task['files']
         if not files:
             calc_files.append(i)
-        elif 'train.csv' in [os.path.basename(str(name)) for name in files]:
+        elif 'train.csv' in task['files']:
             fit_files.append(i)
         else:
             table_files.append(i)
