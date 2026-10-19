@@ -326,11 +326,11 @@ class Agent:
         remaining_fit = check_infinite(tasks, fit_files, self.out)
         remaining_table = check_infinite(tasks, table_files, self.out)
 
-        def fit_llm(files):
+        def fit_llm(indices):
             # todo
             return
 
-        def table_llm(files):
+        def table_llm(indices):
             # todo
             return 
 
