@@ -289,7 +289,7 @@ def route_tasks(tasks):
         files = task['files']
         if not files:
             calc_files.append(i)
-        elif 'train.csv' in task['files']:
+        elif 'train.csv' in {os.path.basename(p) for p in files}:
             fit_files.append(i)
         else:
             table_files.append(i)
@@ -352,7 +352,8 @@ class Agent:
                                              max_time=clock.left() - 1, stop=['</call>'])
                 next_active = []
                 for j, reply in zip(active, replies):
-                    final[j] = reply
+                    if reply:
+                      final[j] = reply
                     call = dsh.parse_tool_call(reply)
                     if call is None:
                         continue
@@ -360,7 +361,6 @@ class Agent:
                     convs[j].append({'role': 'user', 'content': observe(call)})
                     next_active.append(j)
                 active = next_active
-            answers = []
             for j, i in enumerate(indices):
                 answer = dsh.tagged_number(final[j])
                 if answer is None:
