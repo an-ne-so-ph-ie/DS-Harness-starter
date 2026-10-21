@@ -296,12 +296,12 @@ def route_tasks(tasks):
     return calc_files, fit_files, table_files
 
 
-def check_infinite(tasks, indices, out):
+def check_and_solve_infinite_without_llm(tasks, indices, out):
     remaining = []
     for i in indices:
         task = tasks[i]
         try:
-            answer = float(solve_data(task))
+            answer = dsh.to_number(solve_data(task))
             if math.isfinite(answer):
                 out[i] = {'id': task['id'], 'answer': answer}
                 continue
@@ -313,9 +313,7 @@ def check_infinite(tasks, indices, out):
 
 class Agent:
     def __init__(self):
-        self.llm_calc = None
-        self.llm_fit = None
-        self.llm_table = None
+        self.llm = dsh.load_llm(MODEL)
         self.out = []
 
     def solve(self, tasks, seconds=40.0):
@@ -323,32 +321,33 @@ class Agent:
         self.out = [None] * len(tasks)
 
         calc_files, fit_files, table_files = route_tasks(tasks)
-        remaining_fit = check_infinite(tasks, fit_files, self.out)
-        remaining_table = check_infinite(tasks, table_files, self.out)
+        remaining_fit = check_and_solve_infinite_without_llm(tasks, fit_files, self.out)
+        remaining_table = check_and_solve_infinite_without_llm(tasks, table_files, self.out)
 
         def fit_llm(indices):
             # todo
+            #if task['files']:
+            #        text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
             return
 
         def table_llm(indices):
             # todo
+            #if task['files']:
+            #        text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
             return 
 
         def calc_llm(indices):
-            self.llm_calc = self.llm_calc or dsh.load_llm(MODEL)
             convs = []
             for i in indices:
                 task = tasks[i]
                 text = task['objective']
-                if task['files']:
-                    text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
                 convs.append([{'role': 'system', 'content': SYSTEM_calc}] + DEMO_calc + [{'role': 'user', 'content': text}])
             final = [''] * len(indices)
             active = list(range(len(indices)))
             for _ in range(MAX_ROUNDS):
                 if not active or clock.left() < 3:
                     break
-                replies = self.llm_calc.chat([convs[j] for j in active], max_new_tokens=384,
+                replies = self.llm.chat([convs[j] for j in active], max_new_tokens=384,
                                              max_time=clock.left() - 1, stop=['</call>'])
                 next_active = []
                 for j, reply in zip(active, replies):
