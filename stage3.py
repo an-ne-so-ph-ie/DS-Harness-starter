@@ -6,7 +6,14 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
 import dsh
+import traceback
 
+########## ERRORS ##############################
+
+def report(where):
+    print(f'[agent] {where} failed:\n{traceback.format_exc()}')
+
+########## PROMPTS #####################################
 MODEL = os.environ.get('DSH_MODEL', dsh.DEFAULT_MODEL)
 MAX_ROUNDS = 4
 SYSTEM_calc = (
@@ -31,7 +38,7 @@ DEMO_fit = []
 SYSTEM_table = ()
 DEMO_table = []
 
-
+############## TABEL + FIT ################################################
 def read_files(files, objective=''):
     sources = files.items() if isinstance(files, dict) else ((os.path.basename(str(p)), open(p, encoding='utf-8').read()) for p in files)
     tables = {}
@@ -91,7 +98,7 @@ class Data:
     def values(self, df, phrase, file=None):
         return pd.to_numeric(df[self.column(phrase, file)], errors='coerce')
 
-
+############## TABLE ###############################################
 def aggregate(values, question):
     if re.search(r'\b(?:mean|average)\b', question):
         return values.mean()
@@ -280,7 +287,22 @@ def observe(call):
         return f'Error: {e}'
     return f'Result: {value:.10g}'
 
+def check_and_solve_infinite_without_llm(tasks, indices, out):
+    remaining = []
+    for i in indices:
+        task = tasks[i]
+        try:
+            answer = dsh.to_number(solve_data(task))
+            if math.isfinite(answer):
+                out[i] = {'id': task['id'], 'answer': answer}
+                continue
+        except Exception as e:
+            #print(f'[solve_data] {task["id"]}: {type(e).__name__}: {e}')
+            pass
+        remaining.append(i)
+    return remaining
 
+############# ROUTING #############################################
 def route_tasks(tasks):
     calc_files = []
     fit_files = []
@@ -295,48 +317,42 @@ def route_tasks(tasks):
             table_files.append(i)
     return calc_files, fit_files, table_files
 
-
-def check_and_solve_infinite_without_llm(tasks, indices, out):
-    remaining = []
-    for i in indices:
-        task = tasks[i]
-        try:
-            answer = dsh.to_number(solve_data(task))
-            if math.isfinite(answer):
-                out[i] = {'id': task['id'], 'answer': answer}
-                continue
-        except Exception:
-            pass
-        remaining.append(i)
-    return remaining
-
-
+############# AGENT #################################################
 class Agent:
     def __init__(self):
         self.llm = dsh.load_llm(MODEL)
-        self.out = []
-
-    def solve(self, tasks, seconds=40.0):
-        clock = dsh.Clock(seconds)
         self.out = [None] * len(tasks)
+    
+    def solve(self, tasks, seconds=40.0):
+        self.out = [None] * len(tasks)
+        try:                                              
+            self.solve_fct(tasks, seconds)
+        except Exception:
+            report('solve')
+        # in worst case: we return 0 for everything
+        return [o if o is not None else {'id': t['id'], 'answer': 0}
+                for o, t in zip(self.out, tasks)]
 
-        calc_files, fit_files, table_files = route_tasks(tasks)
-        remaining_fit = check_and_solve_infinite_without_llm(tasks, fit_files, self.out)
-        remaining_table = check_and_solve_infinite_without_llm(tasks, table_files, self.out)
 
-        def fit_llm(indices):
+    def solve_fct(self, tasks, seconds=40.0):
+        clock = dsh.Clock(seconds)
+        calc_tasks, fit_tasks, table_tasks = route_tasks(tasks)
+        remaining_fit = check_and_solve_infinite_without_llm(tasks, fit_tasks, self.out)
+        remaining_table = check_and_solve_infinite_without_llm(tasks, table_tasks, self.out)
+
+        def fit_llm(indices, hclock):
             # todo
             #if task['files']:
             #        text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
             return
 
-        def table_llm(indices):
+        def table_llm(indices, time_left, hclock):
             # todo
             #if task['files']:
             #        text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
             return 
 
-        def calc_llm(indices):
+        def calc_llm(indices, hclock):
             convs = []
             for i in indices:
                 task = tasks[i]
@@ -345,10 +361,10 @@ class Agent:
             final = [''] * len(indices)
             active = list(range(len(indices)))
             for _ in range(MAX_ROUNDS):
-                if not active or clock.left() < 3:
+                if not active or hclock.left() < 3:
                     break
                 replies = self.llm.chat([convs[j] for j in active], max_new_tokens=384,
-                                             max_time=clock.left() - 1, stop=['</call>'])
+                                             max_time=hclock.left() - 1, stop=['</call>'])
                 next_active = []
                 for j, reply in zip(active, replies):
                     if reply:
@@ -366,8 +382,20 @@ class Agent:
                     answer = dsh.last_number(final[j])
                 self.out[i] = {'id': tasks[i]['id'], 'answer': answer if answer is not None else 0}
 
-        calc_llm(calc_files)
-        fit_llm(remaining_fit)
-        table_llm(remaining_table)
+        jobs = [(name, handler_fct, task_cat) for name, handler_fct, task_cat in (('calc', calc_llm, calc_tasks), ('fit', fit_llm, remaining_fit), ('table', table_llm, remaining_table))]
+        # calculate how many task we still have to do
+        tasks_left = sum(len(idx) for _, _, idx in jobs)
+        for name, handler_fct, task_cat in jobs:
+            if not task_cat:
+                continue 
+            # calculate how much time is left for the amount of tasks left in that category/job
+            budget = clock.left() * len(task_cat) / tasks_left
+            tasks_left -= len(task_cat)
+            if budget < 2: # not enough time left to do more, better to give back 0 than to throw exception
+                continue
+            try:                                          
+                handler_fct(task_cat, dsh.Clock(budget, margin=0.5))
+            except Exception:
+                report(name)
 
         return self.out
