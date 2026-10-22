@@ -52,7 +52,8 @@ def read_files(files, objective=''):
             s = s.mask(s.str.lower().isin(['', 'na', 'n/a', 'missing', 'null', 'nan', '?', '-']))
             if '-1' in objective and 'not recorded' in objective.lower():
                 s = s.mask(s.str.match(r'^-1(?:[.,]0+)?$', na=False))
-            numeric = s.str.replace(r'\s*(?:kg|kwh|pts|eur|km|€|%|°c|mj)\s*$', '', regex=True, flags=re.I).str.replace(',', '.', regex=False)
+            # saves every unit if in format number xxxx
+            numeric = s.str.replace(re.compile(r"^(-?\d+(?:[.,]\d+)?)\s*[^\d\s.,]{1,4}$", r"\1", regex = True)).str.replace(',', '.', regex=False)
             converted = pd.to_numeric(numeric, errors='coerce')
             df[col] = converted if s.notna().sum() == converted.notna().sum() else s
         tables[name] = df
@@ -97,6 +98,54 @@ class Data:
 
     def values(self, df, phrase, file=None):
         return pd.to_numeric(df[self.column(phrase, file)], errors='coerce')
+
+def infer_type(task):
+    q = task['objective'].lower()
+    if 'logistic regression' in q:
+        return 'fit.logistic'
+    if 'linear regression' in q or 'least-squares' in q:
+        return 'fit.linear'
+    names = [os.path.basename(str(name)) for name in task['files']]
+    if len([name for name in names if name != 'data_dictionary.csv']) > 1:
+        return 'table.join'
+    if 'for each' in q or 'rank the' in q:
+        return 'table.group'
+    if 'divided by' in q or 'tonnes' in q or 'megajoules' in q:
+        return 'table.derive'
+    if 'among the' in q or 'whose' in q or 'with a' in q:
+        return 'table.filter'
+    return 'table.stat'
+
+
+def solve_data(task):
+    kind = task.get('type') or infer_type(task) 
+    data = Data(task)
+    actions = {
+        'table.stat': stat_task,
+        'table.filter': filter_task,
+        'table.group': group_task,
+        'table.join': join_task,
+        'table.derive': derive_task,
+    }
+    if kind.startswith('fit.'):
+        return fit_task(data, kind == 'fit.logistic')
+    return actions[kind](data)
+
+def check_and_solve_infinite_without_llm(tasks, indices, out):
+    remaining = []
+    for i in indices:
+        task = tasks[i]
+        try:
+            answer = dsh.to_number(solve_data(task))
+            if math.isfinite(answer):
+                out[i] = {'id': task['id'], 'answer': answer}
+                continue
+        except Exception as e:
+            #print(f'[solve_data] {task["id"]}: {type(e).__name__}: {e}')
+            pass
+        remaining.append(i)
+    return remaining
+
 
 ############## TABLE ###############################################
 def aggregate(values, question):
@@ -204,7 +253,7 @@ def join_task(data):
         return len(df)
     return aggregate(data.values(df, match.group(1), left), data.q)
 
-
+############# FIT ##########################################################
 def fit_task(data, logistic):
     q = data.q
     match = re.search(r'\bof (.+?) on (.+?),\s+using\b', q)
@@ -244,38 +293,7 @@ def fit_task(data, logistic):
     return float(np.mean(preds)) if 'mean predicted' in tail else float(preds[0])
 
 
-def infer_type(task):
-    q = task['objective'].lower()
-    if 'logistic regression' in q:
-        return 'fit.logistic'
-    if 'linear regression' in q or 'least-squares' in q:
-        return 'fit.linear'
-    names = [os.path.basename(str(name)) for name in task['files']]
-    if len([name for name in names if name != 'data_dictionary.csv']) > 1:
-        return 'table.join'
-    if 'for each' in q or 'rank the' in q:
-        return 'table.group'
-    if 'divided by' in q or 'tonnes' in q or 'megajoules' in q:
-        return 'table.derive'
-    if 'among the' in q or 'whose' in q or 'with a' in q:
-        return 'table.filter'
-    return 'table.stat'
-
-
-def solve_data(task):
-    kind = task.get('type') or infer_type(task)
-    data = Data(task)
-    actions = {
-        'table.stat': stat_task,
-        'table.filter': filter_task,
-        'table.group': group_task,
-        'table.join': join_task,
-        'table.derive': derive_task,
-    }
-    if kind.startswith('fit.'):
-        return fit_task(data, kind == 'fit.logistic')
-    return actions[kind](data)
-
+######## CALC ##################################################
 
 def observe(call):
     name, arg = call
@@ -286,21 +304,6 @@ def observe(call):
     except (ValueError, ZeroDivisionError, OverflowError, TypeError) as e:
         return f'Error: {e}'
     return f'Result: {value:.10g}'
-
-def check_and_solve_infinite_without_llm(tasks, indices, out):
-    remaining = []
-    for i in indices:
-        task = tasks[i]
-        try:
-            answer = dsh.to_number(solve_data(task))
-            if math.isfinite(answer):
-                out[i] = {'id': task['id'], 'answer': answer}
-                continue
-        except Exception as e:
-            #print(f'[solve_data] {task["id"]}: {type(e).__name__}: {e}')
-            pass
-        remaining.append(i)
-    return remaining
 
 ############# ROUTING #############################################
 def route_tasks(tasks):
