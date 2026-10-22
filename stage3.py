@@ -346,7 +346,7 @@ class Agent:
             #        text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
             return
 
-        def table_llm(indices, time_left, hclock):
+        def table_llm(indices, hclock):
             # todo
             #if task['files']:
             #        text += '\n\nThe files (first lines):\n' + dsh.file_preview(task['files'])
