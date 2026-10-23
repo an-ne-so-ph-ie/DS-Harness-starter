@@ -41,6 +41,15 @@ def route_tasks(tasks):
             table_files.append(i)
     return calc_files, fit_files, table_files
 
+def fix_text(s):
+    # corrects if we loaded the json wrongly (probably not important but helps with windows)
+    try:
+        return s.encode('latin-1').decode('utf-8') if re.search('[ÃÂâ]', s) else s
+    except UnicodeError:
+        return s
+
+
+
 
 # ========================================================================
 #                           AGENT
@@ -63,6 +72,7 @@ class Agent:
 
     def solve_fct(self, tasks, seconds=40.0):
         clock = dsh.Clock(seconds)
+        tasks = [{**t, 'objective': fix_text(t['objective'])} for t in tasks] # loading in correct format
         calc_tasks, fit_tasks, table_tasks = route_tasks(tasks)
         
 
