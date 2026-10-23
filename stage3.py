@@ -15,6 +15,8 @@ import fit_solver as fit
 
 ########## ERRORS ##############################
 
+########## ERRORS ##############################
+
 def report(where):
     print(f'[agent] {where} failed:\n{traceback.format_exc()}')   
 
@@ -100,61 +102,124 @@ class Agent:
                 except Exception as err:
                     print(f'[fit] {tasks[i]["id"]} after mapping: {type(err).__name__}: {err}')
 
+
         def table_llm(indices, hclock):
             if not indices:
                 return
-            prepared={}
-            convs=[]
-            contexts={}
+
+            # First use the LLM only for unresolved column names, then let Python
+            # execute the already-understood aggregation/filtering operation.
+            requests = {}
             for i in indices:
-                task=tasks[i]
-                try:
-                    tables,df,context=tab.prepare_table_semantic(task)
-                except Exception as error:
-                    tables, desc = fit.read_files(task['files'],task['objective'])
-                    names=[name for name in tables if name!='data_dictionary.csv']
-                    if not names:
-                        self.out[i]={'id':task['id'],'answer':0}
-                        prepared[i]=None
-                        convs.append(None)
-                        continue
-                    df=tables[names[0]]
-                    context='Preparation error: '+str(error)+'; data files: '+str({name:list(frame.columns) for name,frame in tables.items()})
-                prepared[i]=(tables,df)
-                convs.append([{'role':'system','content':tab.SYSTEM_table}]+tab.table_examples(task)+[{'role':'user','content':'Question: '+task['objective']+'\n\n'+context}])
-            active=[j for j,i in enumerate(indices) if prepared.get(i) is not None]
-            if not active:
+                request = tab.column_request(tasks[i])
+                if request is not None:
+                    requests[i] = request
+
+            if requests and clock.left() > 9:
+                try
+                    ids = list(requests)
+                    replies = self.llm.chat(
+                        [requests[i][1] for i in ids],
+                        max_new_tokens=32,
+                        max_time=max(2, min(12, hclock.left()))
+                    )
+                    for i, reply in zip(ids, replies):
+                        issue = requests[i][0]
+                        # Never allow a model to invent a column: use exact codes only.
+                        candidates = list(issue.columns)
+                        suggestion = reply.strip().strip('`').strip('"\'')
+                        matches = [col for col in candidates if suggestion == col]
+                        if len(matches) != 1:
+                            matches = [col for col in candidates if re.fullmatch(re.escape(col), suggestion, re.I)]
+                        if len(matches) != 1:
+                            continue
+                        hint = {(issue.filename, str(issue.phrase).lower().strip()): matches[0]}
+                        answer = float(tab.solve_data({**tasks[i], '_column_hints': hint}))
+                        if math.isfinite(answer):
+                            self.out[i] = {'id': tasks[i]['id'], 'answer': answer}
+                except Exception:
+                    pass
+
+            # Only genuinely unresolved questions need the more expensive
+            # model-generated pandas expression.
+            unresolved = [i for i in indices if self.out[i] is None]
+            if not unresolved:
                 return
+
+            prepared, conversations, original_prompts = {}, {}, {}
+            for i in unresolved:
+                task = tasks[i]
+                try:
+                    tables, df, context = tab.prepare_table_semantic(task)
+                except Exception as error:
+                    try:
+                        loaded = tab.read_files(task['files'], task['objective'])
+                        tables = loaded[0] if isinstance(loaded, tuple) else loaded
+                        names = [name for name in tables if name != 'data_dictionary.csv']
+                        if not names:
+                            continue
+                        df = tables[names[0]]
+                        context = 'Available CSVs: ' + repr({k: list(v.columns) for k, v in tables.items()})
+                        context += '\nJoin/preparation problem: ' + str(error)[:160]
+                    except Exception:
+                        continue
+
+                context = tab.table_context(task, tables, df, context)
+                prepared[i] = (tables, df)
+                question = 'Question: ' + task['objective'] + '\n\n' + context
+                original_prompts[i] = question
+                conversations[i] = (
+                    [{'role': 'system', 'content': tab.SYSTEM_table}]
+                    + tab.table_examples(task)
+                    + [{'role': 'user', 'content': question}]
+                )
+
+            active = list(conversations)
+           
+
+            # If execution fails OR the expression skips an essential operation,
+            # show the failure to Qwen and request a corrected expression.
             for attempt in range(3):
-                if not active or self.llm is None or hclock.left()<3:
+                if not active or self.llm is None or hclock.left() < 3:
                     break
                 try:
-                    replies=self.llm.chat([convs[j] for j in active],max_new_tokens=320,max_time=max(1, hclock.left()-1))
+                    max_time = max(1, hclock.left() - (5 if attempt == 0 else 1))
+                    replies = self.llm.chat(
+                        [conversations[i] for i in active],
+                        max_new_tokens=300,
+                        max_time=max_time
+                    )
                 except Exception:
                     break
-                pending=[]
-                for j,reply in zip(active,replies):
-                    i=indices[j]
+                pending = []
+                for i, reply in zip(active, replies):
                     try:
-                        tables,df=prepared[i]
-                        answer=tab.evaluate_table_expression(reply,tables,df)
-                        answer=tab.validate_table_result(tasks[i],answer)
-                        self.out[i]={'id':tasks[i]['id'],'answer':answer}
+                        tables, df = prepared[i]
+                        result = tab.evaluate_table_expression(reply, tables, df)
+                        tab.expression_intent(tasks[i], reply)
+                        result = tab.validate_table_result(tasks[i], result)
+                        self.out[i] = {'id': tasks[i]['id'], 'answer': result}
                     except Exception as error:
-                        columns=list(prepared[i][1].columns)
-                        original_question='Question: '+tasks[i]['objective']
-                        original_context=convs[j][-1]['content'] if attempt==0 else contexts[j]
-                        contexts[j]=original_context
-                        convs[j]=[{'role':'system','content':tab.SYSTEM_table}]+[{'role':'user','content':(
-                            original_context+'\n\nEarlier attempt failed: '+type(error).__name__+': '+str(error)[:250]+'. '
-                            'Do not repeat this expression: '+reply[:240]+'. '
-                            'Use exactly one simple scalar pandas expression. Available df columns: '+repr(columns)
-                        )}]
-                        pending.append(j)
-                active=pending
-            for i in indices:
+                        columns = list(prepared[i][1].columns)
+                        prompt = (
+                            original_prompts[i]
+                            + '\n\nYour previous expression failed: ' + str(error)[:230]
+                            + '\nPrevious expression: ' + reply[:300]
+                            + '\nFix the expression without dropping any question conditions.'
+                            + '\nValid columns: ' + repr(columns)
+                        )
+                        conversations[i] = [
+                            {'role': 'system', 'content': tab.SYSTEM_table},
+                            {'role': 'user', 'content': prompt}
+                        ]
+                        pending.append(i)
+                active = pending
+
+            for i in unresolved:
                 if self.out[i] is None:
-                    self.out[i]={'id':tasks[i]['id'],'answer':0}
+                    self.out[i] = {'id': tasks[i]['id'], 'answer': 0}
+
+
 
         def calc_llm(indices, hclock):
             unresolved=[]
