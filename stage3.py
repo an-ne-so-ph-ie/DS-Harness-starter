@@ -126,10 +126,10 @@ class Agent:
             if not active:
                 return
             for attempt in range(3):
-                if not active or self.llm is None or clock.left()<3:
+                if not active or self.llm is None or hclock.left()<3:
                     break
                 try:
-                    replies=self.llm.chat([convs[j] for j in active],max_new_tokens=320,max_time=max(1,hclock.left()-1))
+                    replies=self.llm.chat([convs[j] for j in active],max_new_tokens=320,max_time=max(1, hclock.left()-1))
                 except Exception:
                     break
                 pending=[]
@@ -167,7 +167,7 @@ class Agent:
                     unresolved.append(i)
             if not unresolved:
                 return
-            if clock.left()<3:
+            if hclock.left()<3:
                 for i in unresolved:self.out[i]={'id':tasks[i]['id'],'answer':0}
                 return
             convs=[]
@@ -177,7 +177,7 @@ class Agent:
             last_valid=[None]*len(unresolved)
             active=list(range(len(unresolved)))
             for attempt in range(MAX_ROUNDS):
-                if not active or clock.left()<3:
+                if not active or hclock.left()<3:
                     break
                 try:
                     replies=self.llm.chat([convs[j] for j in active],max_new_tokens=384,max_time=max(1,hclock.left()-1),stop=['</call>'])
