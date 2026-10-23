@@ -116,7 +116,7 @@ class Agent:
                     requests[i] = request
 
             if requests and clock.left() > 9:
-                try
+                try:
                     ids = list(requests)
                     replies = self.llm.chat(
                         [requests[i][1] for i in ids],
