@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import io
 import os
+from sklearn.linear_model import LogisticRegression
 
 SYSTEM_fit = (
         "Match a phrase from a task to one column of a table. "
@@ -264,22 +265,13 @@ def solve_fit_task(task, model_suggested_columns=None):
         w = np.linalg.lstsq(np.hstack([ones, X]), y, rcond=None)[0]
         b0, b = (w[0], w[1:]) if spec['intercept'] else (0.0, w)
     # logitsitc regression
-    else:
-        # without regularziation: Newton
+    else:   
         mu = X.mean(0) * spec['intercept']
         sd = np.where(X.std(0) > 0, X.std(0), 1.0)
-        Z = np.hstack([ones, (X - mu) / sd])
-        w = np.zeros(Z.shape[1])
-        for _ in range(100):
-            p = 1 / (1 + np.exp(-np.clip(Z @ w, -35, 35)))
-            step = np.linalg.solve(Z.T @ (Z * (p * (1 - p))[:, None]) + 1e-12 * np.eye(len(w)), Z.T @ (y - p))
-            w += step
-            if np.abs(step).max() < 1e-10:
-                break
-        else:
-            raise ValueError('logistic fit did not converge')
-        b = w[ones.shape[1]:] / sd # scale back
-        b0 = w[0] - b @ mu if spec['intercept'] else 0.0
+        m = LogisticRegression(penalty=None, tol=1e-10, max_iter=10000, fit_intercept=spec['intercept']).fit((X - mu) / sd, y)
+        # scale back
+        b = m.coef_[0] / sd
+        b0 = m.intercept_[0] - b @ mu if spec['intercept'] else 0.0
 
     def predict(A):
         z = b0 + A @ b
