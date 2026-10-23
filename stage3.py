@@ -1,214 +1,228 @@
 import os
+import io
 import re
 import math
+import numpy as np
+import operator
+import pandas as pd
 import dsh
+import traceback
+
 import table_solver as tab
 import calc_solver as calc
 import fit_solver as fit
 
-MODEL = os.environ.get('DSH_MODEL', dsh.DEFAULT_MODEL)
 
+########## ERRORS ##############################
+
+def report(where):
+    print(f'[agent] {where} failed:\n{traceback.format_exc()}')   
+
+
+########## PROMPTS #####################################
+MODEL = os.environ.get('DSH_MODEL', dsh.DEFAULT_MODEL)
 MAX_ROUNDS = 4
 
-SYSTEM_calc = (
-    "Solve the numerical problem carefully. You can call <call tool=\"calculator\">EXPRESSION</call> "
-    "with arithmetic and functions sqrt, log, exp, comb, perm, factorial, gcd, lcm, "
-    "mean, median, stdev, pstdev, binom_pmf, binom_ge, binom_le, hypergeom, "
-    "normal_cdf, bayes, days_between, date_add, weekday. "
-    "The arguments to probability functions are probabilities between 0 and 1, not percentages. "
-    "Decide whether the requested answer is a fraction or percentage, and whether a date range is inclusive. "
-    "Compute in the tool rather than mental arithmetic. After a tool result return ANSWER: <number>. "
-    "If an expression fails, correct it. Never output an unexplained guess."
-)
 
-DEMO_calc = [
-    {'role':'user','content':'A price is 80 after a 20% reduction. What was the original price?'},
-    {'role':'assistant','content':'<call tool="calculator">80/(1-0.20)</call>'},
-    {'role':'user','content':'Result: 100'},
-    {'role':'assistant','content':'ANSWER: 100'},
-    {'role':'user','content':'A binomial random variable has n=12 and p=0.2. What is the probability of at least 3 successes?'},
-    {'role':'assistant','content':'<call tool="calculator">binom_ge(12,0.2,3)</call>'},
-    {'role':'user','content':'Result: 0.44165425152'},
-    {'role':'assistant','content':'ANSWER: 0.44165425152'},
-    {'role':'user','content':'A test has prevalence 2%, sensitivity 95% and false positive rate 3%. What is the probability of disease given a positive test, in percent?'},
-    {'role':'assistant','content':'<call tool="calculator">100*bayes(0.02,0.95,0.03)</call>'},
-    {'role':'user','content':'Result: 39.2561983471'},
-    {'role':'assistant','content':'ANSWER: 39.2561983471'}
-]
-
-SYSTEM_table = (
-    "You solve numerical CSV questions by using only the provided pandas DataFrames. "
-    "Write the shortest correct pandas expression producing ONE number. "
-    "df contains the main file joined to lookup tables when possible; tables contains original CSVs. "
-    "The schema gives real names, semantic aliases, category codes, decoded meaning_* labels and example values. "
-    "Use column names that appear in that schema. You may use meaning_* columns for named categories. "
-    "Do not invent a column, category, row or number. Some narrative facts are irrelevant distractors. "
-    "Apply every condition, including the correct denominator for percentages and exclusions of missing observations. "
-    "For a rank, aggregate once per group and rank the group-level results descending with method='min'. "
-    "For a derived ratio divide row by row before aggregating; ignore infinite and missing values. "
-    "When two tables are joined, use the lookup fields only after matching the correct join key. "
-    "Use df.loc[df['col'] > threshold, 'target'] rather than chained Boolean indexing. "
-    "Prefer direct .mean(), .median(), .sum(), .max(), .min(), .count(), .nunique() or len. "
-    "Return just one Python expression. No explanation, Markdown or imports. "
-    "Supported names: df, tables, pd, np, len, round, abs, sum, min, max."
-)
-DEMO_table = [
-        ('Question: What is the mean salary for staff older than 30? Columns: age, salary',"df.loc[df['age']>30,'salary'].mean()"),
-        ('Question: What percentage of orders in region East have a recorded price? Columns: region, price',"100*df.loc[df['region']=='East','price'].notna().mean()"),
-        ('Question: What is the largest total revenue among regions? Columns: region, revenue',"df.groupby('region')['revenue'].sum().max()"),
-        ('Question: What is the rank of East by total revenue per region? Columns: region, revenue',"df.groupby('region')['revenue'].sum().rank(ascending=False,method='min').loc['East']"),
-        ('Question: What is the median revenue per item? Columns: revenue, items',"(df['revenue']/df['items']).replace([np.inf,-np.inf],np.nan).median()"),
-        ('Question: How many observations belong to a department with floor at least 2? Columns: dept, floor',"len(df.loc[df['floor']>=2])"),
-        ('Question: What is the mean floor by metro line, taking the largest group mean? Columns: metro, floor',"df.groupby('metro')['floor'].mean().max()")
-    ]
-
-SYSTEM_fit = ()
-DEMO_fit = []
-
-
-
-def table_examples(task):
-    question=task['objective'].lower()
-    examples=DEMO_table
-    if 'rank' in question:
-        selections=(2,3)
-    elif re.search(r'per (?:item|day|person|kilometre)|ratio|divided by',question):
-        selections=(0,4)
-    elif re.search(r'for each|group|by the',question):
-        selections=(2,6)
-    elif re.search(r'how many|count|belong',question):
-        selections=(1,5)
-    elif re.search(r'fraction|percentage|percent',question):
-        selections=(0,1)
-    else:
-        selections=(0,2)
-    messages=[]
-    for index in selections:
-        prompt,answer=examples[index]
-        messages.extend(({'role':'user','content':prompt},{'role':'assistant','content':answer}))
-    return messages
-
+############# ROUTING #############################################
 def route_tasks(tasks):
-    calc_files=[]
-    fit_files=[]
-    table_files=[]
-    for index,task in enumerate(tasks):
-        files=task.get('files',{})
-        names=list(files) if isinstance(files,dict) else [os.path.basename(str(file)) for file in files]
-        if not names:
-            calc_files.append(index)
-        elif 'train.csv' in names or (task.get('type') or '').startswith('fit.'):
-            fit_files.append(index)
+    calc_files = []
+    fit_files = []
+    table_files = []
+    for i, task in enumerate(tasks):
+        files = task['files']
+        if not files:
+            calc_files.append(i)
+        elif 'train.csv' in {os.path.basename(p) for p in files}:
+            fit_files.append(i)
         else:
-            table_files.append(index)
-    return calc_files,fit_files,table_files
+            table_files.append(i)
+    return calc_files, fit_files, table_files
 
-def check_infinite(tasks,indices,out):
-    remaining=[]
-    for i in indices:
-        try:
-            try:
-                answer=float(tab.solve_data(tasks[i]))
-            except Exception:
-                if (tasks[i].get('type') or '').startswith('table.') or (tasks[i].get('files') and 'train.csv' not in tasks[i]['files']):
-                    answer=float(tab.solve_table_semantic(tasks[i]))
-                else:
-                    raise
-            if math.isfinite(answer):
-                out[i]={'id':tasks[i]['id'],'answer':answer}
-                continue
-        except Exception:
-            pass
-        remaining.append(i)
-    return remaining
 
+# ========================================================================
+#                           AGENT
+# ========================================================================
 class Agent:
     def __init__(self):
-        self.llm_calc=None
-        self.llm_fit=None
-        self.llm_table=None
-        self.out=[]
+        self.llm = dsh.load_llm(MODEL)
+        self.out = []
+    
+    def solve(self, tasks, seconds=40.0):
+        self.out = [None] * len(tasks)
+        try:                                              
+            self.solve_fct(tasks, seconds)
+        except Exception:
+            report('solve')
+        # in worst case: we return 0 for everything
+        return [o if o is not None else {'id': t['id'], 'answer': 0}
+                for o, t in zip(self.out, tasks)]
 
-    def solve(self,tasks,seconds=40.0):
-        clock=dsh.Clock(seconds)
-        self.out=[None]*len(tasks)
-        calc_indices,fit_indices,table_indices=route_tasks(tasks)
-        fit_unresolved=[]
-        for i in fit_indices:
-            try:
-                answer=float(fit.solve_fit(tasks[i]))
-                if not math.isfinite(answer):
-                    raise ValueError("Non-finite fit")
-                self.out[i]={'id':tasks[i]['id'],'answer':answer}
-            except Exception:
-                fit_unresolved.append(i)
-        table_unresolved=check_infinite(tasks,table_indices,self.out)
 
-        def fit_llm(indices):
-            pass
+    def solve_fct(self, tasks, seconds=40.0):
+        clock = dsh.Clock(seconds)
+        calc_tasks, fit_tasks, table_tasks = route_tasks(tasks)
+        
+
+        ##################### table, fit and calc function ###########################
+        def fit_llm(indices, hclock):
+            unclear_fit_tasks = []
+            for i in indices:
+                try:
+                    self.out[i] = {"id": tasks[i]['id'], 'answer': fit.solve_fit_task(tasks[i])}
+                except fit.Unclear as e:
+                    unclear_fit_tasks.append((i,e))
+                except Exception as e:
+                    print(f'[fit] {tasks[i]["id"]}: {type(e).__name__}: {e}')
+            # finished all tasks or no time left
+            if not unclear_fit_tasks or hclock.left() < 2: 
+                return
+
+            # for all unclear parts in exercises, we need the help of an llm to know which unclear part of the sentence is related to which column
+            questions = [(i, e, ph) for i, e in unclear_fit_tasks for ph in e.phrases]
+            convs = [[{'role': 'system', 'content': fit.SYSTEM_fit}, *fit.DEMO_fit, {'role': 'user', 'content': 'Columns:\n' + 
+                       '\n'.join(f'{c}: {x}' for c, x in e.columns.items()) + f'\n\nPhrase: {ph}'}] for i, e, ph in questions]
+            replies = self.llm.chat(convs, max_new_tokens=15, max_time=hclock.left() - 1, stop=['</call>'])
+            for (i, e, ph), reply in zip(questions, replies):
+                print(f'[fit LLM] {tasks[i]["id"]} | {ph!r} -> {reply!r}')
+
+            # llm returns the right column, then answer deterministically
+            # read the llm replies (columns): match if the llm replied with only one column
+            columns_from_llm = {i: {} for i, _ in unclear_fit_tasks}                                      
+            for (i, e, ph), reply in zip(questions, replies):
+                codes_in_reply = [c for c in e.columns if re.search(rf'(?<!\w){re.escape(c)}(?!\w)', reply)]
+                if len(codes_in_reply) == 1:                                
+                    columns_from_llm[i][ph] = codes_in_reply[0]
+            for i, e in unclear_fit_tasks:              
+                try:
+                    # solve each task again with the LLMs columns: if a phrase is still missing or the column does not work, we return 0
+                    self.out[i] = {'id': tasks[i]['id'], 'answer': fit.solve_fit_task(tasks[i], columns_from_llm[i])}
+                except Exception as err:
+                    print(f'[fit] {tasks[i]["id"]} after mapping: {type(err).__name__}: {err}')
 
         def table_llm(indices):
             if not indices:
                 return
-            prepared={}
-            convs=[]
-            contexts={}
-            for i in indices:
-                task=tasks[i]
-                try:
-                    tables,df,context=tab.prepare_table_semantic(task)
-                except Exception as error:
-                    tables=tab.read_files(task['files'],task['objective'])
-                    names=[name for name in tables if name!='data_dictionary.csv']
-                    if not names:
-                        self.out[i]={'id':task['id'],'answer':0}
-                        prepared[i]=None
-                        convs.append(None)
-                        continue
-                    df=tables[names[0]]
-                    context='Preparation error: '+str(error)+'; data files: '+str({name:list(frame.columns) for name,frame in tables.items()})
-                prepared[i]=(tables,df)
-                convs.append([{'role':'system','content':SYSTEM_table}]+table_examples(task)+[{'role':'user','content':'Question: '+task['objective']+'\n\n'+context}])
-            active=[j for j,i in enumerate(indices) if prepared.get(i) is not None]
-            if not active:
-                return
-            if clock.left()>3:
-                try:
-                    self.llm_table=self.llm_table or self.llm_calc or dsh.load_llm(MODEL)
-                except Exception:
-                    self.llm_table=None
-            for attempt in range(3):
-                if not active or self.llm_table is None or clock.left()<3:
-                    break
-                try:
-                    replies=self.llm_table.chat([convs[j] for j in active],max_new_tokens=320,max_time=max(1,clock.left()-1))
-                except Exception:
-                    break
-                pending=[]
-                for j,reply in zip(active,replies):
-                    i=indices[j]
-                    try:
-                        tables,df=prepared[i]
-                        answer=tab.evaluate_table_expression(reply,tables,df)
-                        answer=tab.validate_table_result(tasks[i],answer)
-                        self.out[i]={'id':tasks[i]['id'],'answer':answer}
-                    except Exception as error:
-                        columns=list(prepared[i][1].columns)
-                        original_question='Question: '+tasks[i]['objective']
-                        original_context=convs[j][-1]['content'] if attempt==0 else contexts[j]
-                        contexts[j]=original_context
-                        convs[j]=[{'role':'system','content':SYSTEM_table}]+[{'role':'user','content':(
-                            original_context+'\n\nEarlier attempt failed: '+type(error).__name__+': '+str(error)[:250]+'. '
-                            'Do not repeat this expression: '+reply[:240]+'. '
-                            'Use exactly one simple scalar pandas expression. Available df columns: '+repr(columns)
-                        )}]
-                        pending.append(j)
-                active=pending
-            for i in indices:
-                if self.out[i] is None:
-                    self.out[i]={'id':tasks[i]['id'],'answer':0}
 
-        def calc_llm(indices):
+            # First use the LLM only for unresolved column names, then let Python
+            # execute the already-understood aggregation/filtering operation.
+            requests = {}
+            for i in indices:
+                request = tab.column_request(tasks[i])
+                if request is not None:
+                    requests[i] = request
+
+            if requests and clock.left() > 9:
+                try:
+                    self.llm_table = self.llm_table or self.llm_calc or dsh.load_llm(MODEL)
+                    ids = list(requests)
+                    replies = self.llm_table.chat(
+                        [requests[i][1] for i in ids],
+                        max_new_tokens=32,
+                        max_time=max(2, min(12, clock.left() / 3))
+                    )
+                    for i, reply in zip(ids, replies):
+                        issue = requests[i][0]
+                        # Never allow a model to invent a column: use exact codes only.
+                        candidates = list(issue.columns)
+                        suggestion = reply.strip().strip('`').strip('"\'')
+                        matches = [col for col in candidates if suggestion == col]
+                        if len(matches) != 1:
+                            matches = [col for col in candidates if re.fullmatch(re.escape(col), suggestion, re.I)]
+                        if len(matches) != 1:
+                            continue
+                        hint = {(issue.filename, str(issue.phrase).lower().strip()): matches[0]}
+                        answer = float(tab.solve_data({**tasks[i], '_column_hints': hint}))
+                        if math.isfinite(answer):
+                            self.out[i] = {'id': tasks[i]['id'], 'answer': answer}
+                except Exception:
+                    pass
+
+            # Only genuinely unresolved questions need the more expensive
+            # model-generated pandas expression.
+            unresolved = [i for i in indices if self.out[i] is None]
+            if not unresolved:
+                return
+
+            prepared, conversations, original_prompts = {}, {}, {}
+            for i in unresolved:
+                task = tasks[i]
+                try:
+                    tables, df, context = tab.prepare_table_semantic(task)
+                except Exception as error:
+                    try:
+                        loaded = tab.read_files(task['files'], task['objective'])
+                        tables = loaded[0] if isinstance(loaded, tuple) else loaded
+                        names = [name for name in tables if name != 'data_dictionary.csv']
+                        if not names:
+                            continue
+                        df = tables[names[0]]
+                        context = 'Available CSVs: ' + repr({k: list(v.columns) for k, v in tables.items()})
+                        context += '\nJoin/preparation problem: ' + str(error)[:160]
+                    except Exception:
+                        continue
+
+                context = tab.table_context(task, tables, df, context)
+                prepared[i] = (tables, df)
+                question = 'Question: ' + task['objective'] + '\n\n' + context
+                original_prompts[i] = question
+                conversations[i] = (
+                    [{'role': 'system', 'content': tab.SYSTEM_table}]
+                    + tab.table_examples(task)
+                    + [{'role': 'user', 'content': question}]
+                )
+
+            active = list(conversations)
+            if active and clock.left() > 3:
+                try:
+                    self.llm_table = self.llm_table or self.llm_calc or dsh.load_llm(MODEL)
+                except Exception:
+                    self.llm_table = None
+
+            # If execution fails OR the expression skips an essential operation,
+            # show the failure to Qwen and request a corrected expression.
+            for attempt in range(3):
+                if not active or self.llm_table is None or clock.left() < 3:
+                    break
+                try:
+                    max_time = max(1, clock.left() - (5 if attempt == 0 else 1))
+                    replies = self.llm_table.chat(
+                        [conversations[i] for i in active],
+                        max_new_tokens=300,
+                        max_time=max_time
+                    )
+                except Exception:
+                    break
+                pending = []
+                for i, reply in zip(active, replies):
+                    try:
+                        tables, df = prepared[i]
+                        result = tab.evaluate_table_expression(reply, tables, df)
+                        tab.expression_intent(tasks[i], reply)
+                        result = tab.validate_table_result(tasks[i], result)
+                        self.out[i] = {'id': tasks[i]['id'], 'answer': result}
+                    except Exception as error:
+                        columns = list(prepared[i][1].columns)
+                        prompt = (
+                            original_prompts[i]
+                            + '\n\nYour previous expression failed: ' + str(error)[:230]
+                            + '\nPrevious expression: ' + reply[:300]
+                            + '\nFix the expression without dropping any question conditions.'
+                            + '\nValid columns: ' + repr(columns)
+                        )
+                        conversations[i] = [
+                            {'role': 'system', 'content': tab.SYSTEM_table},
+                            {'role': 'user', 'content': prompt}
+                        ]
+                        pending.append(i)
+                active = pending
+
+            for i in unresolved:
+                if self.out[i] is None:
+                    self.out[i] = {'id': tasks[i]['id'], 'answer': 0}
+
+
+        def calc_llm(indices, hclock):
             unresolved=[]
             for i in indices:
                 try:
@@ -219,25 +233,20 @@ class Agent:
                     unresolved.append(i)
             if not unresolved:
                 return
-            if clock.left()<3:
-                for i in unresolved:self.out[i]={'id':tasks[i]['id'],'answer':0}
-                return
-            try:
-                self.llm_calc=self.llm_calc or self.llm_table or dsh.load_llm(MODEL)
-            except Exception:
+            if hclock.left()<3:
                 for i in unresolved:self.out[i]={'id':tasks[i]['id'],'answer':0}
                 return
             convs=[]
             for i in unresolved:
-                convs.append([{'role':'system','content':SYSTEM_calc}]+DEMO_calc+[{'role':'user','content':tasks[i]['objective']}])
+                convs.append([{'role':'system','content':calc.SYSTEM_calc}]+calc.DEMO_calc+[{'role':'user','content':tasks[i]['objective']}])
             final=['']*len(unresolved)
             last_valid=[None]*len(unresolved)
             active=list(range(len(unresolved)))
             for attempt in range(MAX_ROUNDS):
-                if not active or clock.left()<3:
+                if not active or hclock.left()<3:
                     break
                 try:
-                    replies=self.llm_calc.chat([convs[j] for j in active],max_new_tokens=384,max_time=max(1,clock.left()-1),stop=['</call>'])
+                    replies=self.llm.chat([convs[j] for j in active],max_new_tokens=384,max_time=max(1,hclock.left()-1),stop=['</call>'])
                 except Exception:
                     break
                 pending=[]
@@ -258,12 +267,24 @@ class Agent:
                 if answer is None and not dsh.parse_tool_call(final[j]):answer=dsh.last_number(final[j])
                 self.out[i]={'id':tasks[i]['id'],'answer':float(answer) if answer is not None else 0}
 
-        table_llm(table_unresolved)
-        calc_llm(calc_indices)
-        fit_llm(fit_unresolved)
-        
-        for i,task in enumerate(tasks):
-            if self.out[i] is None:
-                self.out[i]={'id':task['id'],'answer':0}
-                
+        ################# starting the jobs ###################################
+        table_unresolved = tab.check_and_solve_infinite(tasks, table_tasks ,self.out)
+        jobs = [(name, handler_fct, task_cat) for name, handler_fct, task_cat in (('fit', fit_llm, fit_tasks), ('calc', calc_llm, calc_tasks), ('table', table_llm, table_unresolved))]
+        # calculate how many task we still have to do
+        tasks_left = sum(len(idx) for _, _, idx in jobs)
+        for name, handler_fct, task_cat in jobs:
+            if not task_cat:
+                continue 
+            # calculate how much time is left for the amount of tasks left in that category/job
+            budget = clock.left() * len(task_cat) / tasks_left
+            tasks_left -= len(task_cat)
+            # not enough time left to do more, better to give back 0 than to throw exception
+            # but the deterministic fit part is fast and can still run (in fit, before starting the llm, the time is checked again)
+            if budget < 2 and name != 'fit': 
+                continue
+            try:                                          
+                handler_fct(task_cat, dsh.Clock(budget, margin=0.5))
+            except Exception:
+                report(name)
+
         return self.out
