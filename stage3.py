@@ -5,7 +5,6 @@ import math
 import numpy as np
 import operator
 import pandas as pd
-from sklearn.linear_model import LinearRegression, LogisticRegression
 import dsh
 import traceback
 
