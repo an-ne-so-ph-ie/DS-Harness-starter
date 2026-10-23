@@ -25,8 +25,8 @@ class Unclear(ValueError):
     # if some part of a sentence are not completely clear and help of llm is needed to return the right column name
     def __init__(self, unresolved_phrases, candidate_columns):
         super().__init__(f"unclear columns: {unresolved_phrases}")
-        self.unresolved_phrases = unresolved_phrases  
-        self.candidate_columns = candidate_columns 
+        self.phrases = unresolved_phrases  
+        self.columns = candidate_columns 
 
 
 def read_files(input_files, objective=''):
