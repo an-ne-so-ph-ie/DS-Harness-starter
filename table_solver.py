@@ -1,6 +1,11 @@
-import os,io,re,math,ast
+import os
+import io
+import re
+import math
+import ast
 import numpy as np
 import pandas as pd
+import fit_solver as fit
 
 SYSTEM_table = (
     "You solve numerical CSV questions by using only the provided pandas DataFrames. "

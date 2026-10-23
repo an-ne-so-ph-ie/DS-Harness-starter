@@ -15,6 +15,8 @@ import fit_solver as fit
 
 ########## ERRORS ##############################
 
+########## ERRORS ##############################
+
 def report(where):
     print(f'[agent] {where} failed:\n{traceback.format_exc()}')   
 
@@ -100,7 +102,8 @@ class Agent:
                 except Exception as err:
                     print(f'[fit] {tasks[i]["id"]} after mapping: {type(err).__name__}: {err}')
 
-        def table_llm(indices):
+
+        def table_llm(indices, hclock):
             if not indices:
                 return
 
@@ -113,13 +116,12 @@ class Agent:
                     requests[i] = request
 
             if requests and clock.left() > 9:
-                try:
-                    self.llm_table = self.llm_table or self.llm_calc or dsh.load_llm(MODEL)
+                try
                     ids = list(requests)
-                    replies = self.llm_table.chat(
+                    replies = self.llm.chat(
                         [requests[i][1] for i in ids],
                         max_new_tokens=32,
-                        max_time=max(2, min(12, clock.left() / 3))
+                        max_time=max(2, min(12, hclock.left()))
                     )
                     for i, reply in zip(ids, replies):
                         issue = requests[i][0]
@@ -173,20 +175,16 @@ class Agent:
                 )
 
             active = list(conversations)
-            if active and clock.left() > 3:
-                try:
-                    self.llm_table = self.llm_table or self.llm_calc or dsh.load_llm(MODEL)
-                except Exception:
-                    self.llm_table = None
+           
 
             # If execution fails OR the expression skips an essential operation,
             # show the failure to Qwen and request a corrected expression.
             for attempt in range(3):
-                if not active or self.llm_table is None or clock.left() < 3:
+                if not active or self.llm is None or hclock.left() < 3:
                     break
                 try:
-                    max_time = max(1, clock.left() - (5 if attempt == 0 else 1))
-                    replies = self.llm_table.chat(
+                    max_time = max(1, hclock.left() - (5 if attempt == 0 else 1))
+                    replies = self.llm.chat(
                         [conversations[i] for i in active],
                         max_new_tokens=300,
                         max_time=max_time
@@ -220,6 +218,7 @@ class Agent:
             for i in unresolved:
                 if self.out[i] is None:
                     self.out[i] = {'id': tasks[i]['id'], 'answer': 0}
+
 
 
         def calc_llm(indices, hclock):

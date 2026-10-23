@@ -5,6 +5,34 @@ import datetime as dt
 import operator
 import statistics
 
+SYSTEM_calc = (
+    "Solve the numerical problem carefully. You can call <call tool=\"calculator\">EXPRESSION</call> "
+    "with arithmetic and functions sqrt, log, exp, comb, perm, factorial, gcd, lcm, "
+    "mean, median, stdev, pstdev, binom_pmf, binom_ge, binom_le, hypergeom, "
+    "normal_cdf, bayes, days_between, date_add, weekday. "
+    "The arguments to probability functions are probabilities between 0 and 1, not percentages. "
+    "Decide whether the requested answer is a fraction or percentage, and whether a date range is inclusive. "
+    "Compute in the tool rather than mental arithmetic. After a tool result return ANSWER: <number>. "
+    "If an expression fails, correct it. Never output an unexplained guess."
+)
+
+DEMO_calc = [
+    {'role':'user','content':'A price is 80 after a 20% reduction. What was the original price?'},
+    {'role':'assistant','content':'<call tool="calculator">80/(1-0.20)</call>'},
+    {'role':'user','content':'Result: 100'},
+    {'role':'assistant','content':'ANSWER: 100'},
+    {'role':'user','content':'A binomial random variable has n=12 and p=0.2. What is the probability of at least 3 successes?'},
+    {'role':'assistant','content':'<call tool="calculator">binom_ge(12,0.2,3)</call>'},
+    {'role':'user','content':'Result: 0.44165425152'},
+    {'role':'assistant','content':'ANSWER: 0.44165425152'},
+    {'role':'user','content':'A test has prevalence 2%, sensitivity 95% and false positive rate 3%. What is the probability of disease given a positive test, in percent?'},
+    {'role':'assistant','content':'<call tool="calculator">100*bayes(0.02,0.95,0.03)</call>'},
+    {'role':'user','content':'Result: 39.2561983471'},
+    {'role':'assistant','content':'ANSWER: 39.2561983471'}
+]
+
+
+
 def binom_pmf(n,p,k):
     return math.comb(int(n),int(k))*float(p)**int(k)*(1-float(p))**(int(n)-int(k)) if 0<=k<=n else 0.0
 
