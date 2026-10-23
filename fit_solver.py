@@ -159,10 +159,10 @@ def solve_fit_task(task, model_suggested_columns=None):
          # model_suggested_columns from llm is priorized if exists
         out = {ph: model_suggested_columns[ph] for ph in phrases if (model_suggested_columns or {}).get(ph) in allowed}
  
-        def score(phrase_word_stems, column_word_stems):
+        def score(phrase_word_stems, head, column_word_stems):
             # get a score/count for each combination (same word, how much is identical in phrase and column).
             shared_word_count = len(phrase_word_stems & column_word_stems)
-            return (column_word_stems == phrase_word_stems, shared_word_count / len(phrase_word_stems), shared_word_count / max(len(column_word_stems), 1))
+            return (column_word_stems == phrase_word_stems, shared_word_count / len(phrase_word_stems), head <= column_word_stems, shared_word_count / max(len(column_word_stems), 1))
 
         # first very strong threshold, then easy to be higher
         for threshold in (0.5, 1e-9):                       
@@ -176,7 +176,8 @@ def solve_fit_task(task, model_suggested_columns=None):
                     p = stems(ph)
                     if not p:
                         continue
-                    scored = sorted(((score(p, s), c) for c, s in free.items()), reverse=True)
+                    head = stems(re.sub(r'\(.*?\)', ' ', ph).split()[-1])   # last word counts as the main noun for unclear cases
+                    scored = sorted(((score(p, head, s), c) for c, s in free.items()), reverse=True)
                     if scored and (scored[0][0][0] or scored[0][0][1] >= threshold) and \
                             (len(scored) == 1 or scored[1][0] < scored[0][0]):   # unique first place is necessary
                         best.append((scored[0][0], ph, scored[0][1]))
