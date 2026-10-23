@@ -112,7 +112,7 @@ class Agent:
                 try:
                     tables,df,context=tab.prepare_table_semantic(task)
                 except Exception as error:
-                    tables=tab.read_files(task['files'],task['objective'])
+                    tables, desc = tab.read_files(task['files'],task['objective'])
                     names=[name for name in tables if name!='data_dictionary.csv']
                     if not names:
                         self.out[i]={'id':task['id'],'answer':0}

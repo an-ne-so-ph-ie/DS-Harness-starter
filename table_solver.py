@@ -62,15 +62,11 @@ class Data:
         self.t = task
         self.q = task['objective']
         self.lower = self.q.lower()
-        self.tables = fit.read_files(task['files'], self.q)
-        raw = self.tables.get('data_dictionary.csv')
+        self.tables, desc = fit.read_files(task['files'], self.q)
         self.map = {}
         self.descriptions = {}
-        if raw is not None:
-            for row_index, r in raw.iterrows():
-                name, col, desc = str(r['file']),str(r['column']),str(r['description']).lower()
-                self.map.setdefault(name, {})[col] = desc
-                self.descriptions[(name, col)] = desc
+        for (name, col), text in desc.items():
+            self.map.setdefault(name, {})[col] = text.lower()
         self.files = [x for x in self.tables if x != 'data_dictionary.csv']
         if not self.files: raise ValueError('No data files')
         if 'train.csv' in self.files: self.main = 'train.csv'
