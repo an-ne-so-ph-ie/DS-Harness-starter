@@ -5,6 +5,7 @@ import math
 import ast
 import numpy as np
 import pandas as pd
+import fit_solver as fit
 
 SYSTEM_table = (
     "You solve numerical CSV questions by using only the provided pandas DataFrames. "
@@ -54,35 +55,14 @@ def table_examples(task):
         messages.extend(({'role':'user','content':prompt},{'role':'assistant','content':answer}))
     return messages
 
-def read_files(files, objective=''):
-    if isinstance(files, dict):
-        sources = list(files.items())
-    else:
-        sources = [(os.path.basename(str(p)), open(p, encoding='utf-8').read()) for p in files]
-    frames = {}
-    for name, content in sources:
-        sep = ';' if content.splitlines()[0].count(';') > content.splitlines()[0].count(',') else ','
-        frame = pd.read_csv(io.StringIO(content), sep=sep, dtype=str, keep_default_na=False)
-        frame.columns = frame.columns.str.strip()
-        for col in frame:
-            s = frame[col].astype('string').str.strip()
-            s = s.mask(s.str.lower().isin(['', 'na','n/a','missing','null','nan','?','-']))
-            s = s.mask(s.str.match(r'^-1(?:[.,]0+)?$', na=False)) if '-1' in objective and 'not recorded' in objective.lower() else s
-            numeric = s.str.replace(r'\s*(?:kg|kwh|pts|eur|km|k€|€|%|°c|mj|C|k)\s*$', '', regex=True, flags=re.I).str.replace(',', '.', regex=False)
-            parsed = pd.to_numeric(numeric, errors='coerce')
-            if s.notna().sum() and parsed.notna().sum() == s.notna().sum():
-                frame[col] = parsed
-            else:
-                frame[col] = s
-        frames[name] = frame
-    return frames
+
 
 class Data:
     def __init__(self, task):
         self.t = task
         self.q = task['objective']
         self.lower = self.q.lower()
-        self.tables = read_files(task['files'], self.q)
+        self.tables = fit.read_files(task['files'], self.q)
         raw = self.tables.get('data_dictionary.csv')
         self.map = {}
         self.descriptions = {}
