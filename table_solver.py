@@ -56,7 +56,7 @@ def table_examples(task):
         selected = (5, 7)
     elif 'rank' in question:
         selected = (2, 3)
-    elif re.search(r'75th percentile|standard deviation|quantile', question):
+    elif re.search(r'\d(?:st|nd|rd|th) percentile|standard deviation|quantile', question):
         selected = (10, 11)
     elif re.search(r'\b(?:born|listed|shipped|delivered|date of|dated)\b', question):
         selected = (0, 9)
@@ -273,8 +273,12 @@ def clean_frame(d,frame,name):
         except ValueError:pass
     return df
 
+# check
+USED_VALUES=[]
+WEAK={}   
 
 def category_mask(df, col, value, desc=''):
+    USED_VALUES.append(str(value).strip().lower())
     s=df[col].astype('string').str.strip().str.lower()
     v=str(value).strip().lower()
     if s.eq(v).any():return s.eq(v)
@@ -285,7 +289,8 @@ def category_mask(df, col, value, desc=''):
     labels=re.findall(r'\b([a-z]+\d+|[a-z]{2,4})\s+([^,;()]+)',desc.lower())
     for code,label in labels:
         if v in label or label.strip() in v:return s.eq(code)
-    if s.str.contains(re.escape(v),regex=True,na=False).any():return s.str.contains(re.escape(v),regex=True,na=False)
+    if s.str.contains(re.escape(v),regex=True,na=False).any():
+        return s.str.contains(re.escape(v),regex=True,na=False)
     raise ValueError(f'Cannot map categorical value {value!r} to {col!r}')
 
 
@@ -690,9 +695,21 @@ def normalize_question(question):
         text = re.sub(pattern, value, text, flags=re.I)
     return text
 
+def unused_category_labels(d):
+    bad=[]
+    for cols in d.map.values():
+        for desc in cols.values():
+            if 'coded (' not in desc:continue
+            for code,label in re.findall(r'\b([a-z]{1,4}\d+|[a-z]{2,4})\s+([^,]+)',desc.split('coded (',1)[1].split(')',1)[0]):
+                label=label.strip()
+                if len(label)>=3 and re.search(r'\b'+re.escape(label)+r'\b',d.lower):
+                    if not any(label in u or u in label or u==code for u in USED_VALUES):bad.append(label)
+    return bad
 
-def solve_data(t):
+
+def solve_data(t, strict=True):
     # Infer the operation after standardizing wording, not before.
+    USED_VALUES.clear()
     task = {**t, 'objective': normalize_question(t['objective'])}
     typ = task.get('type') or infer_type(task)
     if not typ.startswith('table.'):
@@ -702,12 +719,15 @@ def solve_data(t):
     result = generic_table(data)
     # A mathematically valid result is still wrong if an explicit restriction
     # was silently ignored by a pattern-based parser.
-    if typ != 'table.join' and data.filters_used == 0:
+    if strict and typ != 'table.join' and data.filters_used == 0:
         q = task['objective'].lower()
         if re.search(r'\bamong the\b|\bconsider only\b', q):
             raise ValueError('Unapplied subset restriction')
         if re.search(r'\b(?:strictly greater than|strictly less than|at least|at most)\s+-?\d', q):
             raise ValueError('Unapplied numeric filter')
+        bad = unused_category_labels(data)
+        if bad:
+            raise ValueError('Unapplied category restriction: ' + ', '.join(bad))
     return result
 
 
@@ -818,7 +838,11 @@ def check_and_solve_infinite(tasks,indices,out):
                 out[i]={'id':tasks[i]['id'],'answer':answer}
                 continue
         except Exception:
-            pass
+            try:
+                weak=float(solve_data(tasks[i],strict=False))
+                if math.isfinite(weak):WEAK[tasks[i]['id']]=weak
+            except Exception:
+                pass
         remaining.append(i)
     return remaining
 

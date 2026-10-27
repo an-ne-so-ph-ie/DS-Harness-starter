@@ -7,6 +7,7 @@ import operator
 import pandas as pd
 import dsh
 import traceback
+import collections
 
 import table_solver as tab
 import calc_solver as calc
@@ -24,6 +25,19 @@ def report(where):
 ########## PROMPTS #####################################
 MODEL = os.environ.get('DSH_MODEL', dsh.DEFAULT_MODEL)
 MAX_ROUNDS = 4
+# worst case: try more with LLM with some temp
+N_SAMPLES = 4
+SAMPLE_TEMP = 0.7
+
+def vote(candidates):
+    # compare different answers on how often they came
+    vals = [c for c in candidates if c is not None and math.isfinite(c)]
+    if not vals:
+        return None
+    key = lambda v: float(f'{v:.9g}')
+    counts = collections.Counter(key(v) for v in vals)
+    best = max(counts.values())
+    return next(v for v in vals if counts[key(v)] == best)
 
 
 ############# ROUTING #############################################
@@ -115,7 +129,7 @@ class Agent:
                 if request is not None:
                     requests[i] = request
 
-            if requests and clock.left() > 9:
+            if requests and hclock.left() > 9:
                 try:
                     ids = list(requests)
                     replies = self.llm.chat(
@@ -175,7 +189,16 @@ class Agent:
                 )
 
             active = list(conversations)
-           
+
+            weak = {}
+
+            def run_candidate(i, reply):
+                tables, df = prepared[i]
+                result = tab.evaluate_table_expression(reply, tables, df)
+                weak[i] = result                                  
+                tab.expression_intent(tasks[i], reply)
+                return tab.validate_table_result(tasks[i], result)
+
 
             # If execution fails OR the expression skips an essential operation,
             # show the failure to Qwen and request a corrected expression.
@@ -188,31 +211,43 @@ class Agent:
                         [conversations[i] for i in active],
                         max_new_tokens=300,
                         max_time=max_time
-                    )
+                    ) # worst case: let the llm try it more if time left and get the most probable answer by doing it mulitple times
+                    samples = []
+                    if attempt == 0 and hclock.left() > 8:
+                        samples = self.llm.chat([conversations[i] for i in active for _ in range(N_SAMPLES)],
+                            max_new_tokens=200, temperature=SAMPLE_TEMP, batch_size=16,
+                             max_time=min(8, hclock.left() - 4))
                 except Exception:
                     break
                 pending = []
-                for i, reply in zip(active, replies):
-                    try:
-                        tables, df = prepared[i]
-                        result = tab.evaluate_table_expression(reply, tables, df)
-                        tab.expression_intent(tasks[i], reply)
-                        result = tab.validate_table_result(tasks[i], result)
-                        self.out[i] = {'id': tasks[i]['id'], 'answer': result}
-                    except Exception as error:
-                        columns = list(prepared[i][1].columns)
-                        prompt = (
-                            original_prompts[i]
-                            + '\n\nYour previous expression failed: ' + str(error)[:230]
-                            + '\nPrevious expression: ' + reply[:300]
-                            + '\nFix the expression without dropping any question conditions.'
-                            + '\nValid columns: ' + repr(columns)
-                        )
-                        conversations[i] = [
-                            {'role': 'system', 'content': tab.SYSTEM_table},
-                            {'role': 'user', 'content': prompt}
-                        ]
-                        pending.append(i)
+                for pos, (i, reply) in enumerate(zip(active, replies)):
+                    candidates = [reply] + samples[pos * N_SAMPLES:(pos + 1) * N_SAMPLES]
+                    results, greedy_error = [], None
+                    for k, cand in enumerate(candidates):
+                        try:
+                            results.append(run_candidate(i, cand))
+                        except Exception as error:
+                            if k == 0:
+                                greedy_error = error
+                    if results: # deterministic answer still counts and counts double
+                        det = tab.WEAK.get(tasks[i]['id'])
+                        pool = ([det] * 2 if det is not None else []) + results
+                        self.out[i] = {'id': tasks[i]['id'], 'answer': vote(pool)}
+                        continue
+
+                    columns = list(prepared[i][1].columns)
+                    prompt = (
+                        original_prompts[i]
+                        + '\n\nYour previous expression failed: ' + str(greedy_error)[:230]
+                        + '\nPrevious expression: ' + reply[:300]
+                        + '\nFix the expression without dropping any question conditions.'
+                        + '\nValid columns: ' + repr(columns)
+                    )
+                    conversations[i] = [
+                        {'role': 'system', 'content': tab.SYSTEM_table},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                    pending.append(i)
                 active = pending
 
             for i in unresolved:
@@ -238,32 +273,46 @@ class Agent:
             convs=[]
             for i in unresolved:
                 convs.append([{'role':'system','content':calc.SYSTEM_calc}]+calc.DEMO_calc+[{'role':'user','content':tasks[i]['objective']}])
-            final=['']*len(unresolved)
-            last_valid=[None]*len(unresolved)
-            active=list(range(len(unresolved)))
-            for attempt in range(MAX_ROUNDS):
-                if not active or hclock.left()<3:
-                    break
-                try:
-                    replies=self.llm.chat([convs[j] for j in active],max_new_tokens=384,max_time=max(1,hclock.left()-1),stop=['</call>'])
-                except Exception:
-                    break
-                pending=[]
-                for j,reply in zip(active,replies):
-                    final[j]=reply
-                    call=dsh.parse_tool_call(reply)
-                    if call is not None:
-                        obs=calc.observe(call)
-                        match=re.fullmatch(r'Result: ([-+\deE.]+)',obs)
-                        if match:last_valid[j]=float(match[1])
-                        convs[j].append({'role':'assistant','content':reply})
-                        convs[j].append({'role':'user','content':obs})
-                        pending.append(j)
-                active=pending
+            
+            def rounds(conv_list, temperature):
+                convs_=[list(c) for c in conv_list]
+                final=['']*len(convs_)
+                last_valid=[None]*len(convs_)
+                active=list(range(len(convs_)))
+                for attempt in range(MAX_ROUNDS):
+                    if not active or hclock.left()<3:
+                        break
+                    try:
+                        replies=self.llm.chat([convs_[j] for j in active],max_new_tokens=384,max_time=max(1,hclock.left()-1),stop=['</call>'],temperature=temperature,batch_size=16)
+                    except Exception:
+                        break
+                    pending=[]
+                    for j,reply in zip(active,replies):
+                        final[j]=reply
+                        call=dsh.parse_tool_call(reply)
+                        if call is not None:
+                            obs=calc.observe(call)
+                            match=re.fullmatch(r'Result: ([-+\deE.]+)',obs)
+                            if match:last_valid[j]=float(match[1])
+                            convs_[j].append({'role':'assistant','content':reply})
+                            convs_[j].append({'role':'user','content':obs})
+                            pending.append(j)
+                    active=pending
+                answers=[]
+                for j in range(len(convs_)):
+                    answer=dsh.tagged_number(final[j])
+                    if answer is None:answer=last_valid[j]
+                    if answer is None and not dsh.parse_tool_call(final[j]):answer=dsh.last_number(final[j])
+                    answers.append(answer)
+                return answers
+ 
+            answers=[[a] for a in rounds(convs,0.0)]                         
+            if hclock.left()>8:                                              
+                sampled=rounds([c for c in convs for _ in range(N_SAMPLES)],SAMPLE_TEMP)
+                for j in range(len(convs)):
+                    answers[j]+=sampled[j*N_SAMPLES:(j+1)*N_SAMPLES]
             for j,i in enumerate(unresolved):
-                answer=dsh.tagged_number(final[j])
-                if answer is None:answer=last_valid[j]
-                if answer is None and not dsh.parse_tool_call(final[j]):answer=dsh.last_number(final[j])
+                answer=vote(answers[j])
                 self.out[i]={'id':tasks[i]['id'],'answer':float(answer) if answer is not None else 0}
 
         ################# starting the jobs ###################################
