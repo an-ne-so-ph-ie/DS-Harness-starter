@@ -289,7 +289,7 @@ def solve_fit_task(task, model_suggested_columns=None):
     else:   
         mu = X.mean(0) * spec['intercept']
         sd = np.where(X.std(0) > 0, X.std(0), 1.0)
-        m = LogisticRegression(penalty=None, tol=1e-10, max_iter=10000, fit_intercept=spec['intercept']).fit((X - mu) / sd, y)
+        m = LogisticRegression(C=np.inf, tol=1e-10, max_iter=10000, fit_intercept=spec['intercept']).fit((X - mu) / sd, y)
         # scale back
         b = m.coef_[0] / sd
         b0 = m.intercept_[0] - b @ mu if spec['intercept'] else 0.0
