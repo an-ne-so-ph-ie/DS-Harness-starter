@@ -81,34 +81,6 @@ def table_examples(task):
     return messages
 
 
-def read_files(files, objective=''):
-    if isinstance(files, dict):
-        sources = list(files.items())
-    else:
-        sources = [(os.path.basename(str(p)), open(p, encoding='utf-8').read()) for p in files]
-    frames = {}
-    # detect the CSV separator and clean the columns of each file
-    for name, content in sources:
-        sep = ';' if content.splitlines()[0].count(';') > content.splitlines()[0].count(',') else ','
-        frame = pd.read_csv(io.StringIO(content), sep=sep, dtype=str, keep_default_na=False)
-        frame.columns = frame.columns.str.strip()
-        # replace missing-value tokens and convert entirely numeric columns
-        for col in frame:
-            s = frame[col].astype('string').str.strip()
-            s = s.mask(s.str.lower().isin(['', 'na','n/a','missing','null','nan','?','-']))
-            # Leave numeric -1 intact here: only a column explicitly described
-            # as using -1 for missing data should have it masked later.
-            numeric = s.str.replace(r'^\s*([-+]?\d+(?:[.,]\d+)?)\s*[^\d\s.,]{1,8}\s*$', r'\1', regex=True).str.replace(',', '.', regex=False)
-            parsed = pd.to_numeric(numeric, errors='coerce')
-            if s.notna().sum() and parsed.notna().sum() == s.notna().sum():
-                frame[col] = parsed
-            else:
-                frame[col] = s
-        # keep each processed table under its filename
-        frames[name] = frame
-    return frames
-
-
 class ColumnUnclear(ValueError):
     """The deterministic query is understood, but a column name needs clarification."""
 
@@ -127,7 +99,7 @@ class Data:
         self.column_hints = task.get('_column_hints', {})
         self.q = task['objective']
         self.lower = self.q.lower()
-        self.tables = read_files(task['files'], self.q)
+        self.tables, _ = fit.read_files(task['files'], self.q)
         # use data_dictionary.csv to translate coded column names into their meaning
         raw = self.tables.get('data_dictionary.csv')
         self.map = {}
