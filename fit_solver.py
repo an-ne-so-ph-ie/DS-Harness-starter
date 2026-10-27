@@ -258,13 +258,18 @@ def solve_fit_task(task, model_suggested_columns=None):
 
     # match task to columns
     target, feats, trf = spec['target'], spec['features'], spec['train_filter']
-    cols = resolve([target, *feats] + ([trf[0]] if trf else []), desc, allowed,
-                    df=train, binary=target if spec['logistic'] else None, numeric=feats)
+    #cols = resolve([target, *feats] + ([trf[0]] if trf else []), desc, allowed,
+    #                df=train, binary=target if spec['logistic'] else None, numeric=feats)
+    cols = resolve([target, *feats] + ([trf[0][0]] if trf else []), desc, allowed,
+               df=train, binary=target if spec['logistic'] else None, numeric=feats)
     if len({cols[p] for p in [target, *feats]}) < len(feats) + 1:
         raise ValueError('two phrases point at the same column')
 
     # convert into training data (into numeric, normalizing etc) such that a regression can be perfomed
-    rows = where(train, trf, cols.get(trf[0]) if trf else None)
+    #rows = where(train, trf, cols.get(trf[0]) if trf else None)
+    rows = train
+    for filter_col, comp_fct, value in trf:
+        rows = where(rows,(filter_col, comp_fct, value),cols[filter_col])
     X = rows[[cols[f] for f in feats]].apply(pd.to_numeric, errors='coerce')
     y = rows[cols[target]]
     if spec['logistic'] and pd.to_numeric(y, errors='coerce').notna().sum() < y.notna().sum():
@@ -329,7 +334,15 @@ def solve_fit_task(task, model_suggested_columns=None):
             raise ValueError(f"no row {spec['id']} in test.csv")
     else: # if more test rows are needed
         tf = spec['test_filter']
-        sel = where(test, tf, resolve([tf[0]], tdesc, tallowed)[tf[0]] if tf else None)
+        #sel = where(test, tf, resolve([tf[0]], tdesc, tallowed)[tf[0]] if tf else None)
+        if tf:
+            sel = test
+            for filter_col, comp_fct, value in tf:
+                resolved_filter = resolve([filter_col], tdesc, tallowed)[filter_col]
+                sel = where(sel, (filter_col, comp_fct, value), resolved_filter)
+        else:
+            sel = test
+
     Xt = sel[[tcols[f] for f in feats]].apply(pd.to_numeric, errors='coerce')
     if q == 'predict' and Xt.isna().any(axis=None):
         raise ValueError('the test row has a missing feature')
