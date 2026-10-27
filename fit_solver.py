@@ -34,6 +34,8 @@ def read_files(input_files, objective=''):
 
     source_files = input_files.items() if isinstance(input_files, dict) else (
         (os.path.basename(str(file_path)), open(file_path, encoding='utf-8').read()) for file_path in input_files)
+    stated = re.findall(r"missing values are written((?:\s*(?:,|or|and)?\s*'[^']+')+)", objective, re.I)
+    missing = set(['', 'na', 'n/a', 'missing', 'null', 'nan', '?', '-']) | {t.lower() for part in stated for t in re.findall(r"'([^']+)'", part)}
     tables_by_filename = {}
     for file_name, file_content in source_files:
         csv_header = file_content.splitlines()[0]
@@ -44,12 +46,9 @@ def read_files(input_files, objective=''):
         df.columns = df.columns.str.strip()
         for col in df:
             s = df[col].astype('string').str.strip()
-            s = s.mask(s.str.lower().isin(['', 'na', 'n/a', 'missing', 'null', 'nan', '?', '-']))
-            # -1 only as empty if it is written explicitly in the task
-            if '-1' in objective and 'not recorded' in objective.lower():
-                s = s.mask(s.str.match(r'^-1(?:[.,]0+)?$', na=False))
-            # saves every unit if in format number xxxx
-            numeric = s.str.replace(re.compile(r"^(-?\d+(?:[.,]\d+)?)\s*[^\d\s.,]{1,4}$"), r"\1", regex = True).str.replace(',', '.', regex=False)
+            s = s.mask(s.str.lower().isin(missing))
+            # saves every unit if in format number xxxx (and currency sign in front)
+            numeric = s.str.replace(re.compile(r"^[€$£]?\s*(-?\d+(?:[.,]\d+)?)\s*[^\d\s.,]{0,4}$"), r"\1", regex = True).str.replace(',', '.', regex=False)
             converted = pd.to_numeric(numeric, errors='coerce')
             df[col] = converted if s.notna().sum() == converted.notna().sum() else s
         tables_by_filename[file_name] = df
@@ -68,6 +67,14 @@ def read_files(input_files, objective=''):
         else:
             col_desc = {(n, c): x for n, t in tables_by_filename.items() for c, x in zip(col, text) if c in t.columns}
     return tables_by_filename, col_desc
+
+def clean_frame(df, objective, desc): # clean frame from table_solver but changed s.t. usable for fit
+    m = re.search(r'(?:a|an|the)\s+([\w\- ]+?)\s+of\s+-1\s+means|(?:the )?value -1 in the\s+([\w\- ]+?)\s+column', objective.lower())
+    hits = [c for c in df if m and stems(m[1] or m[2]) <= stems(desc.get(c, c))]
+    if len(hits) == 1:
+        df = df.copy()
+        df[hits[0]] = df[hits[0]].mask(pd.to_numeric(df[hits[0]], errors='coerce').eq(-1))
+    return df
 
 comp_operators = {'at least': operator.ge, 'at most': operator.le, 'above': operator.gt, 'below': operator.lt,
        'greater than': operator.gt, 'strictly greater than': operator.gt, 'greater than or equal to': operator.ge,
@@ -143,7 +150,7 @@ def solve_fit_task(task, model_suggested_columns=None):
     tables, entries = read_files(task['files'], task['objective'])
     if 'train.csv' not in tables or 'test.csv' not in tables:
         raise ValueError('train.csv or test.csv missing')
-    train, test = tables['train.csv'], tables['test.csv']
+    train, test = (clean_frame(tables[n], task['objective'], {c: entries.get((n, c), c) for c in tables[n]}) for n in ('train.csv', 'test.csv'))
 
     def describe(name, df):
         # look for id column (or take first one) and get description and returns only allowed columns
