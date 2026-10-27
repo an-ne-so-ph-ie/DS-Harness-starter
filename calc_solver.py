@@ -193,6 +193,11 @@ def solve_dates(q):
     if md:return weekday(md[1])
     return None
 
+def as_percent_if_asked(q, p):
+    return p * 100 if re.search(r'\bin percent\b|\bas a percent\w*|\bpercentage\b', q) else p
+ 
+
+
 def solve_probability(q):
     pairs=re.findall(r'(-?\d+(?:\.\d+)?)\s+(?:euros|dollars|\$)\s+with probability\s+(\d+(?:\.\d+)?)%',q)
     if len(pairs)>=2 and 'expected' in q and abs(sum(float(p) for amount,p in pairs)-100)<0.001:
@@ -203,16 +208,19 @@ def solve_probability(q):
         faces={'six':6,'four':4,'eight':8,'ten':10,'twelve':12,'twenty':20}
         if n and total:
             size=int(n[2]) if n[2].isdigit() else faces.get(n[2])
-            if size:return dice_sum(int(n[1]),int(total[1]),size)
+            if size:
+                return as_percent_if_asked(q,dice_sum(int(n[1]),int(total[1]),size))
     if 'probability' in q and ('defective' in q or 'success' in q or 'fails' in q):
         prob=re.search(r'probability\s+('+NUMBER_PATTERN+r')',q)
         count=re.search(r'(?:among|out of|in)\s+(\d+)\s+(?:parts|trials|items|attempts)',q)
         threshold=re.search(r'(at least|at most|exactly)\s+(\d+)\s+(?:defective|success|fail)',q)
         if prob and count and threshold:
             p=float(prob[1]);n=int(count[1]);k=int(threshold[2])
-            if threshold[1]=='at least':return binom_ge(n,p,k)
-            if threshold[1]=='at most':return binom_le(n,p,k)
-            return binom_pmf(n,p,k)
+            if threshold[1]=='at least':
+                return as_percent_if_asked(q,binom_ge(n,p,k))
+            if threshold[1]=='at most':
+                return as_percent_if_asked(q,binom_le(n,p,k))
+            return as_percent_if_asked(q,binom_pmf(n,p,k))
     return None
 
 def solve_numbers(q):
