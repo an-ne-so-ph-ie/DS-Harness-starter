@@ -119,6 +119,20 @@ def condition(text):
     # for the rest: get the operator from comp_operators
     return m['col'], comp_operators[m['op'].lower()], float(m['num'])
 
+def conditions(text): # idea: allow multiple separated conditions 
+    text = text.strip(' ,.;')
+    if not text:
+        return []
+    parts = re.split(r',?\s+and\s+(?=(?:an?|the|whose|with)\s)', text)
+    out = []
+    for i, part in enumerate(parts):
+        part = part.strip(' ,')
+        if i and not re.match(r'(?:with an? |whose )', part, re.I):
+            part = 'with ' + part
+        out.append(condition(part))
+    return out
+
+
 
 # takes task and returns patterns and a structured model
 def parse_fit(objective):
@@ -137,12 +151,12 @@ def parse_fit(objective):
             'target': m['target'].strip(),
             'features': [p.strip().removeprefix('the ').strip()
                          for p in re.split(r',\s*(?:and\s+)?|\s+and\s+', m['features']) if p.strip()],
-            'train_filter': condition(m['filter']),
+            'train_filter': conditions(m['filter']),
             'leak': re.findall(r'Do not use the columns? described as "([^"]+)"', objective),
             'dedupe': bool(re.search(r'duplicat|appear twice|count each .* once|one copy of each', objective, re.I)),
             'question': question_type, 'coef': group.get('phrase'), 'id': group.get('id'),
             'count': (comp_operators[group['op'].lower()], float(group['thr'])) if 'op' in group else None,
-            'test_filter': condition(group['cond']) if 'cond' in group else None}
+            'test_filter': conditions(group['cond']) if 'cond' in group else None}
 
 # solve task without using an llm 
 def solve_fit_task(task, model_suggested_columns=None):
