@@ -100,22 +100,32 @@ MATH_FUNCTIONS={'sqrt':math.sqrt,'exp':math.exp,'log':math.log,'log10':math.log1
 def math_calculator(expr):
     if len(expr)>900:raise ValueError('Expression too long')
     tree=ast.parse(expr.strip(),mode='eval')
-    if len(list(ast.walk(tree)))>150:raise ValueError('Expression too complex')
+    if len(list(ast.walk(tree)))>150:
+        raise ValueError('Expression too complex')
     def evaluate(node,depth=0):
-        if depth>32:raise ValueError('Expression too deep')
-        if isinstance(node,ast.Constant) and type(node.value) in (int,float,str):return node.value
+        if depth>32:
+            raise ValueError('Expression too deep')
+        if isinstance(node,ast.Constant) and type(node.value) in (int,float,str):
+            return node.value
         if isinstance(node,(ast.List,ast.Tuple)):
-            if len(node.elts)>300:raise ValueError('Too many elements')
+            if len(node.elts)>300:
+                raise ValueError('Too many elements')
             return [evaluate(x,depth+1) for x in node.elts]
         if isinstance(node,ast.UnaryOp) and type(node.op) in (ast.UAdd,ast.USub):
             x=evaluate(node.operand,depth+1);return x if isinstance(node.op,ast.UAdd) else -x
         if isinstance(node,ast.BinOp) and type(node.op) in MATH_OPERATIONS:
             a=evaluate(node.left,depth+1);b=evaluate(node.right,depth+1)
-            if type(node.op)==ast.Pow and (abs(float(b))>1000 or abs(float(a))>1e100):raise ValueError('Power exceeds limits')
+            if type(node.op)==ast.Pow and (abs(float(b))>1000 or abs(float(a))>1e100):
+                raise ValueError('Power exceeds limits')
             return MATH_OPERATIONS[type(node.op)](a,b)
         if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id in MATH_FUNCTIONS and not node.keywords:
             return MATH_FUNCTIONS[node.func.id](*[evaluate(x,depth+1) for x in node.args])
-        if isinstance(node,ast.Name) and node.id in ('pi','e'):return math.pi if node.id=='pi' else math.e
+        if isinstance(node,ast.Name) and node.id in ('pi','e'):
+            return math.pi if node.id=='pi' else math.e
+        if isinstance(node,ast.Call) and isinstance(node.func,ast.Name):
+            raise ValueError('unknown function %r; available: %s'%(node.func.id,', '.join(sorted(MATH_FUNCTIONS))))
+        if isinstance(node,ast.Name):
+            raise ValueError('unknown name %r; use numbers, pi, e'%node.id)
         raise ValueError('Unsupported mathematical expression')
     result=evaluate(tree.body)
     if isinstance(result,bool) or not isinstance(result,(int,float)) or not math.isfinite(float(result)):
@@ -126,11 +136,19 @@ NUMBER_PATTERN=r'-?\d+(?:\.\d+)?'
 
 DATE_PATTERN=r'(?:\d{4}-\d\d-\d\d|\d{1,2}\s+[a-z]+\s+\d{4}|[a-z]+\s+\d{1,2},?\s+\d{4})'
 
+MATH_FUNCTIONS.update({'ln':math.log,'log2':math.log2,'sin':math.sin,'cos':math.cos,'tan':math.tan,'atan':math.atan, 'radians':math.radians,'degrees':math.degrees,'pow':math.pow,'hypot':math.hypot,'variance':statistics.variance,'pvariance':statistics.pvariance, 'geometric_mean':statistics.geometric_mean,'harmonic_mean':statistics.harmonic_mean})
+
 def number_list(q):
     candidates=re.findall(r'(?<![\d.])-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?){2,}',q)
-    if not candidates:return None
+    if not candidates:
+        return None
     best=max(candidates,key=lambda x:len(x))
     return [float(x.strip()) for x in best.split(',')]
+
+def has_word(q,*words): # make sure assume is not taken if looking for "sum"
+    return any(re.search(r'\b'+w+r'\b',q) for w in words)
+ 
+
 
 def solve_inline(q):
     if 'weighted mean' in q and 'coefficient' in q:
@@ -142,11 +160,28 @@ def solve_inline(q):
     if values:
         if 'strictly above' in q or 'greater than' in q:
             m=re.search(r'(?:strictly above|greater than)\s+('+NUMBER_PATTERN+r')',q)
-            if m:return sum(x>float(m[1]) for x in values)
-        if re.search(r'\b(?:population )?standard deviation\b',q):return statistics.pstdev(values) if 'population' in q or 'divide by n' in q else statistics.stdev(values)
-        if 'median' in q:return statistics.median(values)
-        if 'mean' in q or 'average' in q:return statistics.mean(values)
-        if 'total' in q or 'sum' in q:return sum(values)
+            if m:
+                return sum(x>float(m[1]) for x in values)
+        if has_word(q,'absolute deviation','geometric','harmonic','trimmed','mode','percentile','quartile','interquartile',
+                    'skewness','kurtosis','correlation','covariance','weighted','squares?','squared','cumulative'):
+            return None
+        if re.search(r'\b(?:above|below|over|under)\s+the\s+(?:mean|average|median)\b',q):
+            return None
+        if has_word(q,'how many') and not re.search(r'strictly above|greater than',q):
+            return None
+        if has_word(q,'variance'):
+            return statistics.pvariance(values) if 'population' in q or 'divide by n' in q else statistics.variance(values)
+        if re.search(r'\b(?:population )?standard deviation\b',q):
+            return statistics.pstdev(values) if 'population' in q or 'divide by n' in q else statistics.stdev(values)
+        if has_word(q,'median'):
+            return statistics.median(values)
+        if has_word(q,'mean','average'):
+            return statistics.mean(values)
+        big=has_word(q,'largest','maximum','highest','greatest')
+        small=has_word(q,'smallest','minimum','lowest')
+        if big!=small:
+            return max(values) if big else min(values)
+        if has_word(q,'total','sum'):return sum(values)
     return None
 
 def solve_dates(q):
