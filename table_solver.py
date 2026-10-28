@@ -8,23 +8,27 @@ import pandas as pd
 import fit_solver as fit
 
 SYSTEM_table = (
-    "You solve numerical CSV questions by using only the provided pandas DataFrames. "
-    "Write the shortest correct pandas expression producing ONE number. "
-    "df contains the main file joined to lookup tables when possible; tables contains original CSVs. "
-    "The schema gives real names, semantic aliases, category codes, decoded meaning_* labels and example values. "
-    "Use column names that appear in that schema. You may use meaning_* columns for named categories. "
-    "Do not invent a column, category, row or number. Some narrative facts are irrelevant distractors. "
-    "Apply every condition, including the correct denominator for percentages and exclusions of missing observations. "
-    "For a rank, aggregate once per group and rank the group-level results descending with method='min'. "
-    "For a derived ratio divide row by row before aggregating; ignore infinite and missing values. "
-    "df is already joined with a lookup table when possible; do not join again unless the context explicitly says no join was possible. "
-    "Use df.loc[df['col'] > threshold, 'target'] rather than chained Boolean indexing. "
-    "Prefer direct .mean(), .median(), .sum(), .max(), .min(), .count(), .nunique() or len. "
-    "Apply every stated filter; do not compute an overall statistic when a subset is requested. "
-    "Dates may need pd.to_datetime; use .notna() to exclude missing denominators. "
-    "Return just one Python expression. No explanation, Markdown or imports. "
-    "Supported names: df, tables, pd, np, len, round, abs, sum, min, max."
+    "You are a data analyst translating one numerical CSV question into one executable pandas expression. "
+    "You MUST calculate using the actual DataFrame; never guess a number. "
+    "Return ONE single Python expression only, no commentary, code fence, import, print or ANSWER label. "
+    "The DataFrame df is the observation-level table, with a verified left join to lookup tables when available. "
+    "tables is a mapping from CSV filename to its original DataFrame. "
+    "Use ONLY real column names from the schema; descriptions are semantic names, not Python column names. "
+    "When category values are coded, filter using exact codes or provided meaning_* decoded columns. "
+    "A question about readings AT sites is a filter on the joined site attributes. "
+    "Some narrative facts are irrelevant distractors; do not turn them into filters. "  
+    "Follow every qualifying condition. WHERE/whose/at least/below/between/after/during restrict the dataset BEFORE aggregation. "
+    "If the question asks the share WITHIN a filtered group, first select that group, then calculate its fraction. "
+    "For percentage multiply by 100; for fraction keep 0..1. Missing denominators are excluded as specified. "
+    "For rank, aggregate per group before applying rank(ascending=False,method='min'). "
+    "For a largest or second-largest GROUP statistic, group first and only then take max or nlargest. "
+    "Distinguish mean of row-level ratios from ratio of column totals. For per-row ratios exclude zero and missing denominators. "
+    "For weighted mean use sum(value*weight)/sum(valid weights), excluding rows with missing values or weights. "
+    "For calendar filters convert to datetime and compare year/dates. "
+    "Available names: df, tables, pd, np, len, round, abs, sum, min, max, float, int. "
+    "Prefer pandas .loc, .groupby, .mean, .median, .sum, .count, .nunique, .quantile and .corr."
 )
+
 DEMO_table = [
         ('Question: What is the mean salary for staff older than 30? Columns: age, salary',"df.loc[df['age']>30,'salary'].mean()"),
         ('Question: What percentage of orders in region East have a recorded price? Columns: region, price',"100*df.loc[df['region']=='East','price'].notna().mean()"),
@@ -40,45 +44,81 @@ DEMO_table = [
         ,('Question: What is the population standard deviation of speed? Columns: speed', "df['speed'].std(ddof=0)")
     ]
 
+DEMO_table += [
+    ('Question: What is the Pearson correlation between income and expenses? Columns: income, expenses', "df['income'].corr(df['expenses'])"),
+    ('Question: How many distinct customer IDs are there? Columns: customer_id', "df['customer_id'].nunique()"),
+    ('Question: What is the 25th percentile of the weight? Columns: weight', "df['weight'].quantile(0.25)"),
+    ('Question: What is the population variance of temperature? Columns: temp', "df['temp'].var(ddof=0)"),
+    ('Question: How many distinct regions have price above 40? Columns: region, price', "df.loc[df['price'] > 40, 'region'].nunique()")
+]
+
+DEMO_table.extend([
+    ('Question: Among rows with quantity over 4, what percentage has recorded cost? Columns: qty, cost',
+     "100*df.loc[df['qty']>4,'cost'].notna().mean()"),
+    ('Question: What is the mean amount for rows dated in 2024? Columns: day, amount',
+     "df.loc[pd.to_datetime(df['day'],errors='coerce').dt.year==2024,'amount'].mean()"),
+    ('Question: What is the second-largest sum of amount by region? Columns: region, amount',
+     "df.groupby('region')['amount'].sum().nlargest(2).iloc[-1]"),
+    ('Question: Find the percentage change in total revenue from 2023 to 2024. Columns: day, revenue',
+     "100*(df.loc[pd.to_datetime(df['day']).dt.year==2024,'revenue'].sum()/df.loc[pd.to_datetime(df['day']).dt.year==2023,'revenue'].sum()-1)"),
+    ('Question: What is the average price weighted by quantity, for category A? Columns: category, price, quantity',
+     "(df.loc[(df['category']=='A')&df['price'].notna()&df['quantity'].notna(),'price']*df.loc[(df['category']=='A')&df['price'].notna()&df['quantity'].notna(),'quantity']).sum()/df.loc[(df['category']=='A')&df['price'].notna()&df['quantity'].notna(),'quantity'].sum()"),
+    ('Question: What is total revenue divided by total expense, only for rows having both? Columns: revenue, expense',
+     "df.loc[df['revenue'].notna()&df['expense'].notna(),'revenue'].sum()/df.loc[df['revenue'].notna()&df['expense'].notna(),'expense'].sum()"),
+    ('Question: What is the average revenue for readings at sites with floor at least 3? Columns in already joined df: revenue, floor',
+     "df.loc[df['floor']>=3,'revenue'].mean()"),
+    ('Question: What fraction of records with a recorded grade have grade at least 60? Columns: grade',
+     "(df.loc[df['grade'].notna(),'grade']>=60).mean()"),
+    ('Question: What is the difference between the maximum and minimum group average cost? Columns: region, cost',
+     "df.groupby('region')['cost'].mean().max()-df.groupby('region')['cost'].mean().min()"),
+])
+
 
 COMPARISON_PATTERN=r'(strictly greater than|strictly less than|greater than|less than|of at least|of at most|at least|at most|on or after|before|below|above|after|in|is)'
 DATE_TEXT_PATTERN=r'(?:[a-z]+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[a-z]+\s+\d{4}|[a-z]+\s+\d{4}|\d{4})'
 
 
 def table_examples(task):
-    """Choose two demonstrations; they are four user/assistant chat messages."""
-    question = task['objective'].lower()
+    """Retrieve short demonstrations by operation, not memorized domain templates."""
+    q = task['objective'].lower()
     files = task.get('files') or {}
     names = list(files) if isinstance(files, dict) else [os.path.basename(str(p)) for p in files]
-    data_file_count = sum(name != 'data_dictionary.csv' for name in names)
-
-    if data_file_count > 1:
-        selected = (5, 7)
-    elif 'rank' in question:
-        selected = (2, 3)
-    elif re.search(r'\d(?:st|nd|rd|th) percentile|standard deviation|quantile', question):
-        selected = (10, 11)
-    elif re.search(r'\b(?:born|listed|shipped|delivered|date of|dated)\b', question):
-        selected = (0, 9)
-    elif re.search(r'\bper\b|ratio|divided by', question):
-        selected = (0, 4)
-    elif re.search(r'\b(?:fraction|percentage|percent)\b', question):
-        selected = (1, 8)
-    elif re.search(r'\b(?:for each|group|by the)\b', question):
-        selected = (2, 6)
-    elif re.search(r'\b(?:how many|count|belong)\b', question):
-        selected = (1, 5)
-    else:
-        selected = (0, 2)
-
+    joined = sum(n != 'data_dictionary.csv' for n in names) > 1
+    rules = [
+        (r'\b(?:weighted mean|weighted average)\b', (21, 4, 0)),
+        (r'\b(?:growth|percentage change|percent change)\b', (20, 9, 2)),
+        (r'\b(?:second|third|top [0-9]+)\b', (19, 2, 3)),
+        (r'\b(?:ratio of totals|total.+divided by total)\b', (22, 4, 1)),
+        (r'\b(?:rank|ranking)\b', (3, 2, 19)),
+        (r'\b(?:difference between.*(?:largest|smallest|average)|difference between.*mean)\b', (25, 2, 6)),
+        (r'\b(?:on or after|before|after|during|dated|year|month)\b', (18, 9, 0)),
+        (r'\b(?:percentage|percent|fraction|proportion|share)\b', (17, 24, 1)),
+        (r'\b(?:correlation|pearson|spearman)\b', (12, 4, 14)),
+        (r'\b(?:distinct|different|unique)\b', (13, 16, 1)),
+        (r'\b(?:percentile|quantile|iqr|interquartile)\b', (14, 10, 11)),
+        (r'\bvariance|standard deviation\b', (15, 11, 10)),
+        (r'\b(?:per person|per item|per day|divided by|ratio)\b', (4, 22, 0)),
+        (r'\b(?:for each|group|by the|by site|by region|across sites)\b', (2, 6, 25)),
+        (r'\b(?:missing|recorded|not recorded)\b', (24, 17, 1)),
+    ]
+    selected = None
+    for regex, indexes in rules:
+        if re.search(regex, q):
+            selected = indexes
+            break
+    if selected is None:
+        selected = (23, 7, 2) if joined else (0, 1, 2)
+    if joined and not any(i in (7, 23) for i in selected):
+        selected = selected[:2] + (23,)
     messages = []
     for idx in selected:
         prompt, answer = DEMO_table[idx]
-        messages.extend((
-            {'role': 'user', 'content': prompt},
-            {'role': 'assistant', 'content': answer},
-        ))
+        messages.extend(({'role': 'user', 'content': prompt}, {'role': 'assistant', 'content': answer}))
     return messages
+
+
+def read_files(files, objective=''):
+    return fit.read_files(files, objective)[0]
 
 
 class ColumnUnclear(ValueError):
@@ -99,7 +139,7 @@ class Data:
         self.column_hints = task.get('_column_hints', {})
         self.q = task['objective']
         self.lower = self.q.lower()
-        self.tables, _ = fit.read_files(task['files'], self.q)
+        self.tables = read_files(task['files'], self.q)
         # use data_dictionary.csv to translate coded column names into their meaning
         raw = self.tables.get('data_dictionary.csv')
         self.map = {}
@@ -273,9 +313,10 @@ def clean_frame(d,frame,name):
         except ValueError:pass
     return df
 
-# check
-USED_VALUES=[]
-WEAK={}   
+
+USED_VALUES=[]   
+WEAK={}          
+
 
 def category_mask(df, col, value, desc=''):
     USED_VALUES.append(str(value).strip().lower())
@@ -289,8 +330,7 @@ def category_mask(df, col, value, desc=''):
     labels=re.findall(r'\b([a-z]+\d+|[a-z]{2,4})\s+([^,;()]+)',desc.lower())
     for code,label in labels:
         if v in label or label.strip() in v:return s.eq(code)
-    if s.str.contains(re.escape(v),regex=True,na=False).any():
-        return s.str.contains(re.escape(v),regex=True,na=False)
+    if s.str.contains(re.escape(v),regex=True,na=False).any():return s.str.contains(re.escape(v),regex=True,na=False)
     raise ValueError(f'Cannot map categorical value {value!r} to {col!r}')
 
 
@@ -587,9 +627,73 @@ def generic_join(d):
     return aggregate_values(numeric_values(d,df,x),how)
 
 
+def generic_extra(d):
+    q = d.lower
+    query_tail = q.split('what is ', 1)[-1].split('how many ', 1)[-1]
+    if re.search(r'\b(?:among the|consider only|restricted to|limited to)\b', query_tail) or re.search(r'\bover the \w+(?: \w+){0,2} (?:with|whose|that|of the)\b', query_tail):
+        raise ValueError('Restricted extended statistic needs the flexible expression solver')
+    df = source_frame(d)
+    if 'weighted mean' in q or 'weighted average' in q:
+        m = re.search(r'weighted (?:mean|average) of (?:the )?(.+?) (?:using|weighted by) (?:the )?(.+?)(?:\s+over all[^?]*)?\?', q)
+        if m:
+            value = resolve_column(d, m[1], numeric=True)
+            weight = resolve_column(d, m[2], numeric=True, exclude=[value])
+            a, w = numeric_values(d, df, value), numeric_values(d, df, weight)
+            mask = a.notna() & w.notna()
+            if not mask.any() or w[mask].sum() == 0:
+                raise ValueError('Invalid or empty weights')
+            return float((a[mask] * w[mask]).sum() / w[mask].sum())
+    if re.search(r'\bproduct of\b', q):
+        m = re.search(r'product of (?:the )?(.+?)(?:\s+over all[^?]*)?\?', q)
+        if m:
+            col = resolve_column(d, m[1], numeric=True)
+            return float(numeric_values(d,df,col).prod(min_count=1))
+    if re.search(r'\b(?:pearson |spearman )?(?:correlation|correlation coefficient)\b', q):
+        match = re.search(r'correlation(?: coefficient)?\s+between\s+(?:the )?(.+?)\s+and\s+(?:the )?(.+?)(?:\?|\.|\s+over\s+all)', q)
+        if not match:
+            raise ValueError('Unable to identify the correlation variables')
+        x = resolve_column(d, match[1], numeric=True)
+        y = resolve_column(d, match[2], numeric=True, exclude=[x])
+        how = 'spearman' if 'spearman' in q else 'pearson'
+        return float(numeric_values(d, df, x).corr(numeric_values(d, df, y), method=how))
+    if 'interquartile range' in q or re.search(r'\biqr\b', q):
+        match = re.search(r'(?:interquartile range|iqr)\s+of\s+(?:the )?(.+?)(?:\s+over\s+all|\s+among\s+the|\?|\.)', q)
+        if not match:
+            raise ValueError('Unknown interquartile range column')
+        col = resolve_column(d, match[1], numeric=True)
+        x = numeric_values(d, df, col)
+        return float(x.quantile(.75) - x.quantile(.25))
+    if re.search(r'\b(?:percentile|quantile)\b', q):
+        match = re.search(r'\b(\d{1,2})(?:st|nd|rd|th)\s+percentile\s+of\s+(?:the )?(.+?)(?:\s+over\s+all|\s+among\s+the|\s+for\s+the|\?|\.)', q)
+        if match:
+            quantile = int(match[1]) / 100
+            col = resolve_column(d, match[2], numeric=True)
+            return float(numeric_values(d, df, col).quantile(quantile))
+    if re.search(r'\b(?:number of distinct|number of unique|how many distinct|how many different|how many unique)\b', q):
+        match = re.search(r'(?:number of (?:distinct|unique)|how many (?:distinct|different|unique))\s+(?:values?\s+(?:of|in)\s+)?(?:the )?(.+?)(?:\s+are\s+there|\s+over\s+all|\s+in\s+the|\?|\.)', q)
+        if match:
+            try:   
+                col = resolve_column(d, match[1], numeric=False)
+            except ValueError:
+                col = resolve_column(d, match[1])
+            return float(df[col].nunique(dropna=True))
+    if re.search(r'\b(?:population|sample) variance\b', q):
+        match = re.search(r'\b(?:population|sample) variance\s+of\s+(?:the )?(.+?)(?:\s+over\s+all|\?|\.)', q)
+        if match:
+            col = resolve_column(d, match[1], numeric=True)
+            return float(numeric_values(d, df, col).var(ddof=0 if 'population' in q else 1))
+    if 'range' in q and 'maximum' in q and 'minimum' in q:
+        match = re.search(r'range\s+of\s+(?:the )?(.+?)(?:\s+over\s+all|\?|\.)', q)
+        if match:
+            col = resolve_column(d, match[1], numeric=True)
+            x = numeric_values(d, df, col)
+            return float(x.max()-x.min())
+    raise ValueError('No deterministic implementation for this table operation')
+
+
 def generic_table(d):
     typ=d.t.get('type') or infer_type(d.t)
-    funcs={'table.stat':generic_stat,'table.filter':generic_filter,'table.group':generic_group,'table.derive':generic_derive,'table.join':generic_join}
+    funcs={'table.stat':generic_stat,'table.filter':generic_filter,'table.group':generic_group,'table.derive':generic_derive,'table.join':generic_join,'table.extra':generic_extra}
     if typ not in funcs:raise ValueError('Not table')
     return funcs[typ](d)
 
@@ -645,11 +749,13 @@ def infer_type(t):
     q=t['objective'].lower()
     if re.search(r'\b(?:how many|for how many)\b[^?]*\b(?:missing|recorded|not recorded)\b',q):
         return 'table.stat'
-    if 'logistic regression' in q:return 'fit.logistic'
-    if 'linear regression' in q or 'least-squares' in q:return 'fit.linear'
     files=t.get('files',{})
     names=list(files) if isinstance(files,dict) else [os.path.basename(str(name)) for name in files]
     if len([name for name in names if name!='data_dictionary.csv'])>1:return 'table.join'
+    if re.search(r'\b(weighted mean|weighted average|product of)\b',q):return 'table.extra'
+    if re.search(r'\b(correlation|interquartile range|iqr|distinct|different values|unique values|population variance|sample variance|\d+(?:st|nd|rd|th) percentile)\b',q):return 'table.extra'
+    if 'logistic regression' in q:return 'fit.logistic'
+    if 'linear regression' in q or 'least-squares' in q:return 'fit.linear'
     if re.search(r'\b(for each|rank the|group the|by each)\b',q):return 'table.group'
     if re.search(r'\b(consider the|divided by|ratio|per person|per item|per day|per kilometre)\b',q):return 'table.derive'
     if re.search(r'\b(among the|whose|that have|with a|with an|listed before|shipped after|born in)\b',q):return 'table.filter'
@@ -676,12 +782,21 @@ def normalize_question(question):
         (r'\bstrictly below\b', 'strictly less than'),
         (r'\bunder\b', 'strictly less than'),
         (r'\b50th percentile\b', 'median'),
+        (r'\bacross all\b', 'over all'),
+        (r'\bthroughout all\b', 'over all'),
+        (r'\bassociated with\b', 'belong to'),
+        (r'\bcorresponding to\b', 'belong to'),
+        (r'\bwhat percent\b', 'what percentage'),
+        (r'\bwhat proportion\b', 'what fraction'),
         (r'\bhighest\b', 'largest'),
         (r'\blowest\b', 'smallest'),
         (r'\bdetermine the\b', 'what is the')
     ]
     text = question
     # Normalize general question phrasing so one query plan covers several formulations.
+    text = re.sub(r'\brestrict attention to\b', 'consider only', text, flags=re.I)
+    text = re.sub(r'\bare associated with\b', 'belong to', text, flags=re.I)
+    text = re.sub(r'\bis associated with\b', 'belongs to', text, flags=re.I)
     text = re.sub(r'\bhaving\b', 'with', text, flags=re.I)
     text = re.sub(r'\bthat have\b', 'with', text, flags=re.I)
     text = re.sub(r'\b(?:calculate|determine|find)\s+how many\b', 'how many', text, flags=re.I)
@@ -694,6 +809,31 @@ def normalize_question(question):
     for pattern, value in replacements:
         text = re.sub(pattern, value, text, flags=re.I)
     return text
+
+
+
+def guard_unparsed_semantics(task, data, typ):
+    """Fail closed rather than silently dropping a restriction or aggregation layer."""
+    q = task['objective'].lower()
+    if typ in {'table.stat', 'table.filter', 'table.extra', 'table.derive'}:
+        filter_clues = (
+            r'\bwhere\b',
+            r'\b(?:after|before|during)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|\d{4})',
+            r'\b(?:classified as|marked as|restricted to|limited to)\b',
+            r'\b(?:for|among|of) (?:the )?(?:regular|special|trial) (?:readings|records|observations)\b',
+        )
+        if data.filters_used == 0 and any(re.search(pattern, q) for pattern in filter_clues):
+            raise ValueError('Unparsed subset condition; use table model')
+    # A single-column max/mean is not a group-level maximum/mean.
+    if typ not in {'table.group', 'table.join'}:
+        if re.search(r'\b(?:among|across|between) (?:the )?(?:sites|regions|groups|categories|classifications)\b', q) and re.search(r'\b(?:largest|smallest|highest|lowest|difference|maximum|minimum)\b', q):
+            raise ValueError('Unparsed grouped aggregation; use table model')
+        if re.search(r'\b(?:second|third|top \d+|bottom \d+)[ -](?:highest|largest|lowest|smallest)\b', q):
+            raise ValueError('Unparsed nth-ranked aggregation; use table model')
+    # Percentage growth requires TWO periods, not the mean of one column.
+    if typ not in {'table.extra', 'table.derive'} and re.search(r'\b(?:percentage|percent) (?:growth|change|increase|decrease)\b', q):
+        raise ValueError('Unparsed growth operation; use table model')
+
 
 def unused_category_labels(d):
     bad=[]
@@ -717,15 +857,18 @@ def solve_data(t, strict=True):
     task['type'] = typ
     data = Data(task)
     result = generic_table(data)
+    if not strict:
+        return result
+    guard_unparsed_semantics(task, data, typ)
     # A mathematically valid result is still wrong if an explicit restriction
     # was silently ignored by a pattern-based parser.
-    if strict and typ != 'table.join' and data.filters_used == 0:
+    if typ != 'table.join' and data.filters_used == 0:
         q = task['objective'].lower()
         if re.search(r'\bamong the\b|\bconsider only\b', q):
             raise ValueError('Unapplied subset restriction')
         if re.search(r'\b(?:strictly greater than|strictly less than|at least|at most)\s+-?\d', q):
             raise ValueError('Unapplied numeric filter')
-        bad = unused_category_labels(data)
+        bad = unused_category_labels(data)          
         if bad:
             raise ValueError('Unapplied category restriction: ' + ', '.join(bad))
     return result
@@ -838,7 +981,7 @@ def check_and_solve_infinite(tasks,indices,out):
                 out[i]={'id':tasks[i]['id'],'answer':answer}
                 continue
         except Exception:
-            try:
+            try:  
                 weak=float(solve_data(tasks[i],strict=False))
                 if math.isfinite(weak):WEAK[tasks[i]['id']]=weak
             except Exception:
@@ -918,49 +1061,554 @@ def column_request(task):
 
 
 def expression_intent(task, expression):
-    """Reject generated expressions that omit essential, explicit task operations."""
+    """Basic semantic checks on model code, especially missing constraints.
+
+    These checks are intentionally conservative: failure requests model repair.
+    They cannot prove that every logically valid expression is correct.
+    """
     q = task['objective'].lower()
     expression = re.sub(r'^```(?:python)?\s*|\s*```$', '', expression.strip()).strip()
     expression = re.sub(r'^answer\s*:\s*', '', expression, flags=re.I)
-    try:
-        tree = ast.parse(expression, mode='exec')
-    except SyntaxError:
-        return
+    tree = ast.parse(expression, mode='exec')
     nodes = list(ast.walk(tree))
     methods = {n.attr for n in nodes if isinstance(n, ast.Attribute)}
-    numbers = {float(n.value) for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, (int, float))}
-    numbers |= {-float(n.operand.value) for n in nodes if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub) and isinstance(n.operand, ast.Constant) and isinstance(n.operand.value, (int, float))}
-    literals = [n.value for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-    has_division = any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div) for n in nodes)
-    needed = []
-    if re.search(r'\brank (?:of|the)\b', q) and 'rank' not in methods:
-        needed.append('rank aggregated values with .rank()')
+    numbers = {float(n.value) for n in nodes if isinstance(n, ast.Constant)
+               and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)}
+    numbers |= {-float(n.operand.value) for n in nodes
+                if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub)
+                and isinstance(n.operand, ast.Constant) and isinstance(n.operand.value, (int, float))}
+    texts = [str(n.value) for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    source = ast.unparse(tree).lower()
+    has_compare = any(isinstance(n, (ast.Compare, ast.BoolOp)) for n in nodes)
+    has_mul = any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mult) for n in nodes)
+    has_div = any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div) for n in nodes)
+    has_sub = any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Sub) for n in nodes)
+    aggregation = {'mean', 'median', 'sum', 'count', 'size', 'max', 'min', 'nunique', 'std', 'var'}
+    has_selection = has_compare or bool(methods & {'loc','iloc','query','isin','eq','gt','ge','lt','le','between','where','filter'})
+    problems = []
+    if re.search(r'\brank(?:ing)?\b', q) and 'rank' not in methods:
+        problems.append('rank groups using .rank(ascending=False, method="min")')
+    if re.search(r'\b(?:second|third) (?:highest|largest|lowest|smallest)\b', q) and not methods.intersection({'nlargest','nsmallest','sort_values','sort_index','rank'}):
+        problems.append('select the requested second or third group-level statistic, not the absolute maximum')
     if 'standard deviation' in q and 'std' not in methods:
-        needed.append('use .std() for standard deviation')
-    if '75th percentile' in q and not methods.intersection({'quantile', 'percentile'}):
-        needed.append('use .quantile(0.75) for the percentile')
-    if re.search(r'\bconsider\b[^?]+\bdivided by\b', q) and not has_division:
-        needed.append('divide numerator by denominator per row')
-    if re.search(r'\b(?:for each|per group)\b', q) and not methods.intersection({'groupby', 'pivot_table'}):
-        needed.append('aggregate each group separately')
-    if re.search(r'\bwhat (?:percentage|percent)\b', q) and 100.0 not in numbers:
-        needed.append('multiply the fraction by 100 for a percentage')
-    # Check explicit numeric thresholds, not unrelated historical numbers.
-    pattern = r'(?:strictly greater than|strictly less than|greater than|less than|at least|at most|above|below|more than|fewer than)\s+(-?\d+(?:[.,]\d+)?)'
-    for raw in re.findall(pattern, q):
-        threshold = float(raw.replace(',', '.'))
-        if threshold not in numbers and not any(raw in value for value in literals):
-            needed.append(f'apply the threshold {raw}')
-    if re.search(r'\bamong the\b', q) and not methods.intersection({'loc', 'isin', 'eq', 'where', 'groupby', 'query'}):
-        if not any(isinstance(n, ast.Compare) for n in nodes):
-            needed.append('filter to the specified population before aggregating')
-    if needed:
-        raise ValueError('Missing required operation: ' + '; '.join(dict.fromkeys(needed)))
+        problems.append('use .std(ddof=0 for population, ddof=1 for sample)')
+    if re.search(r'\bmedian\b', q) and not methods.intersection({'median','nanmedian','quantile'}):
+        problems.append('use the median rather than the mean or maximum')
+    if re.search(r'\b(?:difference|gap) between\b',q) and not (has_sub or 'diff' in methods):
+        problems.append('calculate the requested difference by subtraction')
+    if re.search(r'\b(?:row by row|per observation|per record)\b', q) and re.search(r'\b(?:ratio|divided by)\b',q) and not (has_div or 'divide' in methods):
+        problems.append('calculate a ratio on each row before aggregation')
+    if re.search(r'\b(?:have|has|with|whose) (?:a )?(?:recorded|nonmissing|missing)\b',q) and re.search(r'\b(?:fraction|percentage|percent)\b',q) and not methods.intersection({'notna','isna','notnull','isnull'}):
+        problems.append('explicitly test recorded/missing values with .notna() or .isna()')
+    if 'population variance' in q or 'sample variance' in q:
+        if 'var' not in methods:
+            problems.append('compute variance with .var()')
+    if 'population standard deviation' in q or 'population variance' in q:
+        if not re.search(r'ddof\s*=\s*0', source) and not {'nanstd','nanvar','std','var'}.isdisjoint(methods):
+            problems.append('use ddof=0 for population variance or standard deviation')
+    if re.search(r'\b\d+(?:st|nd|rd|th) percentile\b',q) and not methods.intersection({'quantile','percentile'}):
+        problems.append('compute the requested quantile')
+    percentile = re.search(r'\b(\d{1,3})(?:st|nd|rd|th) percentile\b', q)
+    if percentile and 'quantile' in methods:
+        p = int(percentile[1])/100
+        if not any(abs(v-p)<1e-10 for v in numbers) and not any(abs(v-100*p)<1e-10 for v in numbers):
+            problems.append(f'use percentile {percentile[1]} -> quantile({p})')
+    if re.search(r'\b(?:distinct|different sites|unique values|unique sites)\b', q) and not methods.intersection({'nunique','unique','drop_duplicates'}):
+        problems.append('count distinct values rather than rows')
+    if re.search(r'\b(?:pearson|spearman|correlation)\b', q) and not methods.intersection({'corr','corrcoef'}):
+        problems.append('calculate the requested correlation')
+    if re.search(r'\b(?:interquartile range|iqr)\b', q) and not methods.intersection({'quantile','percentile'}):
+        problems.append('use 75th percentile minus 25th percentile')
+    if re.search(r'\bweighted (?:mean|average)\b', q) and not ((has_mul or 'multiply' in methods) and (has_div or 'divide' in methods) and 'sum' in methods):
+        problems.append('weighted mean = sum(value * weight) / sum(valid weights), not ordinary .mean()')
+    if re.search(r'\b(?:ratio of totals|total .+ divided by total)\b', q) and not (has_div and 'sum' in methods):
+        problems.append('ratio of totals needs a division between two aggregated sums')
+    if re.search(r'\b(?:growth|percent change|percentage change)\b', q) and not (has_div and has_sub and 100.0 in numbers):
+        problems.append('growth percent = 100 * (new_total / old_total - 1)')
+    if re.search(r'\b(?:per group|by site|by region|across sites|among sites|across regions|per geographic region|by the region)\b',q) and 'groupby' not in methods and 'pivot_table' not in methods:
+        # "for each" is sometimes contextual text, but then groupby is still expected.
+        problems.append('calculate the statistic by group before taking the final scalar')
+    if re.search(r'\b(?:what (?:percentage|percent)|percentage of|percent of|percentage share|percentage growth)\b',q) and 100.0 not in numbers:
+        problems.append('multiply the fraction by 100 to return percent units')
+    if re.search(r'\b(?:where|among the (?!sites\b|regions\b|readings\b\s*$|readings\b.*\?$)|whose|with .+ of at least|at sites|at least \d|at most \d|above \d|below \d|after [a-z]+ \d|during \d{4}|classified as|for regular readings|for special readings)\b',q) and not has_selection:
+        problems.append('apply the specified row filter before aggregating')
+    # Thresholds must appear in the code as numeric constants or strings.
+    threshold_pattern = (r'(?:strictly greater than|strictly less than|greater than|less than|'
+                         r'at least|at most|above|below|more than|fewer than|over|under)\s+'
+                         r'(-?\d+(?:[.,]\d+)?)')
+    for raw in re.findall(threshold_pattern, q):
+        threshold = float(raw.replace(',','.'))
+        if not any(abs(n-threshold)<1e-10 for n in numbers) and not any(raw in txt for txt in texts):
+            problems.append('use the explicit threshold '+raw)
+    # Date-year checks reduce silent full-table averages.
+    if re.search(r'\b(?:dated|recorded|during|in|from|after|before)\s+(?:\d{4}|[a-z]+ \d{1,2},? \d{4})',q):
+        mentioned = re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)',q)
+        for yr in mentioned:
+            if yr not in source:
+                problems.append('apply the stated calendar year '+yr)
+    if 'missing' in q and re.search(r'\b(?:percentage|fraction)\b',q) and not methods.intersection({'isna','notna','isnull','notnull','count'}):
+        problems.append('test missingness explicitly using .isna() or .notna()')
+    if problems:
+        raise ValueError('Missing or unchecked intent: '+'; '.join(dict.fromkeys(problems)))
 
 
 def table_context(task, tables, df, original):
-    """Give the LLM a compact view of full rows as well as separate column examples."""
-    # Rows reveal which codes co-occur, helping prevent wrong filter/measure combinations.
-    preview = df.head(2).to_dict(orient='records')
-    summary = f'\nExample rows of df: {preview}'
-    return original + summary[:1000]
+    """Give the model reliable category values, dtypes and sample rows."""
+    lines = [original]
+    for col in df.columns:
+        series = df[col]
+        nonmissing = series.dropna()
+        if nonmissing.empty:
+            lines.append(f'{col}: all missing')
+            continue
+        if pd.api.types.is_numeric_dtype(series):
+            lines.append(f'{col}: numeric; nonmissing {len(nonmissing)}/{len(series)}; min {nonmissing.min()}, max {nonmissing.max()}')
+        else:
+            vc = nonmissing.astype(str).value_counts()
+            if len(vc) <= 16:
+                sample = [(k, int(v)) for k,v in vc.items()]
+                lines.append(f'{col}: categories/value counts {sample}')
+            else:
+                lines.append(f'{col}: strings; example values {nonmissing.astype(str).iloc[:5].tolist()}')
+    sample = pd.concat([df.head(2),df.tail(1)],axis=0).to_dict(orient='records')
+    lines.append('Example rows (not the full data): '+str(sample)[:1000])
+    lines.append('Use df for real calculations; examples are NOT sufficient to calculate the answer.')
+    return '\n'.join(lines)[:5000]
+
+
+# ================== STRUCTURED TABLE PLAN FALLBACK (V5) ==================
+
+"""Typed table-plan executor for numerically answering CSV questions.
+
+The small LLM selects columns and operations; every actual calculation, filter,
+join and aggregation happens in pandas. No model-generated code is evaluated.
+"""
+import json
+import math
+import re
+
+import numpy as np
+import pandas as pd
+
+
+class PlanError(ValueError):
+    pass
+
+
+SYSTEM = (
+    'Convert a numerical question about CSV tables into ONE compact JSON calculation plan. '
+    'Do NOT solve the question mentally. Python will execute your JSON over the FULL CSV tables. '
+    'Use only exact column codes in SCHEMA. A joined column can be filtered like an ordinary column. '
+    'Reply with ONE JSON object, no markdown, prose or Python. '
+    'Allowed op: stat, group, fraction, ratio, row_ratio, weighted, growth, profit, correlation, difference. '
+    'stat: {"op":"stat","col":"CODE","agg":"mean|sum|median|max|min|count|nunique|size|std|var|quantile|iqr|range|prod|missing|recorded",'
+    '"q":0.75,"sample":true,"where":[]}. '
+    'group: {"op":"group","col":"CODE","group":"CODE","agg":"sum|mean|median|size|count|nunique|max|min",'
+    '"post":"max|min|second_max|second_min|spread|rank|difference|value", "target":"CODE_OR_CATEGORY","target2":"CODE_OR_CATEGORY","where":[]}. '
+    'fraction: {"op":"fraction","col":"CODE_IF_SUM","agg":"size|sum",'
+    '"num_where":[],"den_where":[],"percent":false}; apply numerator and denominator filters separately. '
+    'ratio: {"op":"ratio","col":"NUM_CODE","col2":"DEN_CODE","where":[]}; ratio of sums on SAME valid rows. '
+    'row_ratio: {"op":"row_ratio","col":"NUM_CODE","col2":"DEN_CODE","agg":"mean|median|sum","where":[]}; divide per row and drop zero denominators. '
+    'weighted: {"op":"weighted","col":"VALUE_CODE","weight":"WEIGHT_CODE","where":[]}. '
+    'growth: {"op":"growth","col":"CODE","date":"DATE_CODE","year1":2023,"year2":2024,"percent":true}. '
+    'profit: {"op":"profit","col":"REVENUE_CODE","col2":"COST_CODE","agg":"sum|mean|per_row_mean",'
+    '"weight":"STAFF_CODE_IF_DIVIDE_PER_ROW","where":[]}. '
+    'difference: {"op":"difference","col":"CODE","group":"CODE","agg":"mean|sum", "target":"CAT1","target2":"CAT2"}. '
+    'correlation: {"op":"correlation","col":"CODE","col2":"CODE","method":"pearson|spearman"}. '
+    'Filter syntax: {"col":"CODE","cmp":">|>=|<|<=|==|!=|between|isna|notna|year|after|on_or_after|before|on_or_before",'
+    '"value":NUMBER_OR_CATEGORY_OR_DATE,"value2":NUMBER_FOR_BETWEEN}. '
+    'Do not invent codes. Missing values are excluded by pandas. '
+    'For percentages set percent true; for fractions set false. '
+    'To count rows use stat with agg=size (col optional). To count distinct sites use nunique on site ID. '
+    'For percentage of rows matching a condition, use fraction num_where versus den_where. '
+    'For GROUP rank, use target category and rank descending with min ties. '
+    'For top group totals aggregate by group FIRST, then take post=max or second_max. '
+    'For a date restriction use where date/year filters. ' 
+)
+
+DEMONSTRATIONS = [
+ ('How many distinct sites have revenue above 200?  site_id: site; revenue: money',
+  {"op":"stat","col":"site_id","agg":"nunique","where":[{"col":"revenue","cmp":">","value":200}]}),
+ ('What fraction of readings with revenue recorded have revenue over 100? revenue: numeric',
+  {"op":"fraction","num_where":[{"col":"revenue","cmp":">","value":100}],"den_where":[{"col":"revenue","cmp":"notna"}],"percent":False}),
+ ('What is the percentage of readings with missing cost? cost: numeric',
+  {"op":"fraction","num_where":[{"col":"cost","cmp":"isna"}],"den_where":[],"percent":True}),
+ ('What is the maximum regional sum of revenue? region: region; revenue: amount',
+  {"op":"group","group":"region","col":"revenue","agg":"sum","post":"max"}),
+ ('What is the second-largest total of revenue by region? region: region; revenue: amount',
+  {"op":"group","group":"region","col":"revenue","agg":"sum","post":"second_max"}),
+ ('What is the rank of special by total revenue per classification? classification: classes; revenue: amount',
+  {"op":"group","group":"classification","col":"revenue","agg":"sum","post":"rank","target":"special"}),
+ ('What is the difference between the maximum and minimum average cost among sites? site: site; cost: amount',
+  {"op":"group","group":"site","col":"cost","agg":"mean","post":"spread"}),
+ ('What is the mean revenue for sites in region North? region: geographic region; revenue: amount',
+  {"op":"stat","col":"revenue","agg":"mean","where":[{"col":"region","cmp":"==","value":"North"}]}),
+ ('What is the difference in average revenue between trial and regular? class: classification; revenue: amount',
+  {"op":"difference","group":"class","col":"revenue","agg":"mean","target":"trial","target2":"regular"}),
+ ('What is the average revenue per unit calculated for each record? revenue: revenue; qty: units',
+  {"op":"row_ratio","col":"revenue","col2":"qty","agg":"mean"}),
+ ('What is the total revenue divided by total cost with both values present? revenue: revenue; cost: cost',
+  {"op":"ratio","col":"revenue","col2":"cost"}),
+ ('Compute growth percent in total revenue from 2023 to 2024. day: day; revenue: revenue',
+  {"op":"growth","col":"revenue","date":"day","year1":2023,"year2":2024,"percent":True}),
+ ('Find mean revenue weighted by quantity among regular readings. class: classification; revenue: amount; units: quantity',
+  {"op":"weighted","col":"revenue","weight":"units","where":[{"col":"class","cmp":"==","value":"regular"}]}),
+ ('Compute mean profit per staff member per reading. revenue: amount; cost: cost; staff: people',
+  {"op":"profit","col":"revenue","col2":"cost","weight":"staff","agg":"per_row_mean"}),
+ ('Calculate sample standard deviation of expense. expense: numeric',
+  {"op":"stat","col":"expense","agg":"std","sample":True}),
+]
+
+
+def relevant_examples(question):
+    q = question.lower()
+    if re.search(r'weighted', q): inds = (12, 10)
+    elif re.search(r'growth|percent change', q): inds = (11, 10)
+    elif re.search(r'profit|net of|revenue minus', q): inds = (13, 10)
+    elif re.search(r'rank|second|largest|highest|lowest|by site|by region|per region|across sites', q): inds = (3, 4, 5, 6)
+    elif re.search(r'difference in|difference between.*(trial|regular|category)', q): inds = (8, 6)
+    elif re.search(r'fraction|percentage|share', q): inds = (1, 2)
+    elif re.search(r'per observation|per record|per unit|row by row', q): inds = (9, 10)
+    elif re.search(r'divided by|ratio of totals', q): inds = (10, 9)
+    elif re.search(r'standard deviation|variance', q): inds = (14, 7)
+    elif re.search(r'distinct|unique', q): inds = (0, 7)
+    else: inds = (7, 3)
+    return [({'role':'user','content':s}, {'role':'assistant','content':json.dumps(a,separators=(',',':'))}) for i in inds for s,a in [DEMONSTRATIONS[i]]]
+
+
+def prompt(task, context, frame):
+    # Avoid including full rows: schemas, category codes and ranges fit in small prompt.
+    q=task['objective']
+    schema=context[:4200]
+    examples=relevant_examples(q)
+    return ([{'role':'system','content':SYSTEM}] +
+            [message for pair in examples for message in pair] +
+            [{'role':'user','content':'SCHEMA:\n'+schema+'\n\nQUESTION: '+q+'\nJSON plan:'}])
+
+
+def parse(reply):
+    text=str(reply).strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip()
+    try:
+        p=json.loads(text)
+    except (json.JSONDecodeError,ValueError):
+        start=text.find('{')
+        if start < 0: raise PlanError('No JSON object')
+        dec=json.JSONDecoder()
+        try: p,_=dec.raw_decode(text[start:])
+        except (ValueError,json.JSONDecodeError) as exc: raise PlanError('Invalid JSON: '+str(exc))
+    if not isinstance(p,dict): raise PlanError('Plan must be a JSON object')
+    return p
+
+
+def _column(frame, plan, name, optional=False):
+    value=plan.get(name)
+    if value in (None,'', 'none') and optional:return None
+    if not isinstance(value,str) or value not in frame.columns:
+        raise PlanError(f'{name}: unknown column {value!r}; use exact schema code')
+    return value
+
+
+def _numeric(s):
+    return pd.to_numeric(s,errors='coerce')
+
+
+def _as_category_mask(series, value):
+    v=str(value).strip().lower()
+    return (series.astype('string').str.lower().str.strip()==v).fillna(False)
+
+
+def _category_mask(frame,col,value):
+    base=_as_category_mask(frame[col],value)
+    decoded='meaning_'+col
+    if decoded in frame.columns:
+        base=base|_as_category_mask(frame[decoded],value)
+    return base
+
+
+def _filter_mask(frame, filters):
+    if filters is None: filters=[]
+    if not isinstance(filters,list) or len(filters)>12: raise PlanError('where must be a short list')
+    mask=pd.Series(True,index=frame.index,dtype=bool)
+    for condition in filters:
+        if not isinstance(condition,dict): raise PlanError('Each filter must be a JSON object')
+        col=_column(frame,condition,'col')
+        cmp=str(condition.get('cmp','==')).lower().strip()
+        series=frame[col]
+        val=condition.get('value')
+        if cmp in ('isna','missing'): this=series.isna()
+        elif cmp in ('notna','recorded'): this=series.notna()
+        elif cmp in ('year','year_eq'):
+            date=pd.to_datetime(series,errors='coerce')
+            this=date.dt.year.eq(int(val))
+        elif cmp in ('after','before','on_or_after','on_or_before'):
+            date=pd.to_datetime(series,errors='coerce')
+            boundary=pd.Timestamp(val)
+            this={'after':date.gt,'before':date.lt,'on_or_after':date.ge,'on_or_before':date.le}[cmp](boundary)
+        elif cmp=='between':
+            lo=float(val); hi=float(condition.get('value2'))
+            this=_numeric(series).between(lo,hi,inclusive='both')
+        elif cmp in ('==','=','eq','!=','ne','>','>=','<','<='):
+            if cmp in ('==','=','eq','!=','ne'):
+                if isinstance(val,(int,float)) and not isinstance(val,bool):
+                    this=_numeric(series).eq(float(val))
+                else:
+                    this=_category_mask(frame,col,val)
+                if cmp in ('!=','ne'): this=~this & series.notna()
+            else:
+                num=_numeric(series); x=float(val)
+                this={'>':num.gt,'>=':num.ge,'<':num.lt,'<=':num.le}[cmp](x)
+        else: raise PlanError('Unsupported comparison '+cmp)
+        mask &= this.fillna(False).astype(bool)
+    return mask
+
+
+def _stat(frame, col, agg, plan):
+    agg=str(agg or 'size').lower()
+    if agg in ('size','rows','rowcount'):
+        return float(len(frame))
+    if col is None: raise PlanError('Aggregation needs a column')
+    s=frame[col]
+    if agg in ('missing','isna'): return float(s.isna().sum())
+    if agg in ('recorded','notna','count'): return float(s.notna().sum())
+    if agg in ('unique','distinct','nunique'): return float(s.nunique(dropna=True))
+    nums=_numeric(s).dropna()
+    if nums.empty: raise PlanError('No numeric observations')
+    if agg in ('mean','average','avg'): return float(nums.mean())
+    if agg in ('median',): return float(nums.median())
+    if agg=='sum':return float(nums.sum())
+    if agg=='max':return float(nums.max())
+    if agg=='min':return float(nums.min())
+    if agg=='prod':return float(nums.prod())
+    if agg in ('std','stdev','standard_deviation'):return float(nums.std(ddof=1 if plan.get('sample') else 0))
+    if agg in ('var','variance'):return float(nums.var(ddof=1 if plan.get('sample') else 0))
+    if agg in ('quantile','percentile'):
+        q=float(plan.get('q',.5));q=q/100 if q>1 else q
+        if not 0<=q<=1:raise PlanError('Invalid quantile')
+        return float(nums.quantile(q))
+    if agg=='iqr':return float(nums.quantile(.75)-nums.quantile(.25))
+    if agg in ('range','spread'):return float(nums.max()-nums.min())
+    raise PlanError('Unsupported aggregation '+agg)
+
+
+def _group(frame, plan):
+    g=_column(frame,plan,'group')
+    agg=str(plan.get('agg','size'))
+    col=_column(frame,plan,'col',optional=agg=='size')
+    grouped=frame.groupby(g,dropna=True)
+    if agg=='size': values=grouped.size().astype(float)
+    elif agg=='count': values=grouped[col].count().astype(float)
+    elif agg in ('nunique','distinct'): values=grouped[col].nunique().astype(float)
+    else:
+        nums=_numeric(frame[col]);gr=nums.groupby(frame[g],dropna=True)
+        operations={'sum':gr.sum,'mean':gr.mean,'median':gr.median,'max':gr.max,'min':gr.min,'std':gr.std}
+        if agg not in operations: raise PlanError('Unsupported grouped aggregation '+agg)
+        values=operations[agg]().dropna()
+    if values.empty:raise PlanError('No groups')
+    post=str(plan.get('post','max')).lower()
+    if post=='max':return float(values.max())
+    if post=='min':return float(values.min())
+    if post in ('second_max','second_highest'):
+        if len(values)<2:raise PlanError('Fewer than 2 groups')
+        return float(values.sort_values(ascending=False,kind='stable').iloc[1])
+    if post in ('second_min','second_lowest'):
+        if len(values)<2:raise PlanError('Fewer than 2 groups')
+        return float(values.sort_values(kind='stable').iloc[1])
+    if post in ('spread','range','difference'):return float(values.max()-values.min())
+    if post in ('rank','value'):
+        target=plan.get('target')
+        keys=values.index.astype(str).str.lower().str.strip()
+        which=np.flatnonzero(keys == str(target).lower().strip())
+        if len(which)!=1 and 'meaning_'+g in frame.columns:
+            labels=frame[[g,'meaning_'+g]].dropna().drop_duplicates()
+            matched=labels.loc[_category_mask(labels,'meaning_'+g,target),g]
+            if len(matched)==1:
+                which=np.flatnonzero(keys==str(matched.iloc[0]).lower().strip())
+        if len(which)!=1:raise PlanError('Group '+str(target)+' not found')
+        if post=='value':return float(values.iloc[which[0]])
+        return float(values.rank(method='min',ascending=False).iloc[which[0]])
+    if post=='sum':return float(values.sum())
+    raise PlanError('Unsupported group post-operation '+post)
+
+
+def execute(plan, frame):
+    """Execute a verified plan on a joined DataFrame; never evaluate model code."""
+    if not isinstance(plan,dict) or len(plan)>22:raise PlanError('Invalid plan')
+    op=plan.get('op')
+    if op not in ('stat','group','fraction','ratio','row_ratio','weighted','growth','profit','correlation','difference'):
+        raise PlanError('Unknown operation '+str(op))
+    if op=='fraction':
+        den_mask=_filter_mask(frame,plan.get('den_where'))
+        num=frame.loc[den_mask&_filter_mask(frame,plan.get('num_where'))]
+        den=frame.loc[den_mask]
+        agg=plan.get('agg','size')
+        col=_column(frame,plan,'col',optional=agg=='size')
+        n=_stat(num,col,agg,plan);d=_stat(den,col,agg,plan)
+        if d==0:raise PlanError('Zero denominator')
+        result=n/d*(100 if plan.get('percent') else 1)
+    else:
+        data=frame.loc[_filter_mask(frame,plan.get('where'))]
+        if op=='stat':
+            agg=plan.get('agg','size')
+            result=_stat(data,_column(frame,plan,'col',optional=agg=='size'),agg,plan)
+        elif op=='group':result=_group(data,plan)
+        elif op=='correlation':
+            col=_column(frame,plan,'col');col2=_column(frame,plan,'col2')
+            method=plan.get('method','pearson')
+            if method not in ('pearson','spearman'):raise PlanError('Invalid correlation method')
+            result=_numeric(data[col]).corr(_numeric(data[col2]),method=method)
+        elif op in ('ratio','row_ratio','weighted','profit'):
+            col=_column(frame,plan,'col')
+            rhs='weight' if op=='weighted' else 'col2'
+            col2=_column(frame,plan,rhs)
+            x=_numeric(data[col]);y=_numeric(data[col2]);valid=x.notna()&y.notna()
+            if op=='weighted':
+                x=x[valid];y=y[valid]
+                if y.sum()==0:raise PlanError('Zero weight total')
+                result=(x*y).sum()/y.sum()
+            elif op=='ratio':
+                x=x[valid];y=y[valid]
+                if y.sum()==0:raise PlanError('Zero denominator sum')
+                result=x.sum()/y.sum()
+            elif op=='row_ratio':
+                values=(x[valid]/y[valid].replace(0,np.nan)).replace([np.inf,-np.inf],np.nan).dropna()
+                result=_stat(pd.DataFrame({'result':values}),'result',plan.get('agg','mean'),plan)
+            else:
+                diff=(x[valid]-y[valid])
+                mode=plan.get('agg','sum')
+                if mode=='sum':result=diff.sum()
+                elif mode=='mean':result=diff.mean()
+                elif mode=='per_row_mean':
+                    weight=_column(frame,plan,'weight')
+                    z=_numeric(data[weight]).reindex(diff.index)
+                    result=(diff/z.replace(0,np.nan)).replace([np.inf,-np.inf],np.nan).mean()
+                else:raise PlanError('Invalid profit aggregation')
+        elif op=='growth':
+            c=_column(frame,plan,'col'); date=_column(frame,plan,'date')
+            yrs=pd.to_datetime(data[date],errors='coerce').dt.year
+            x=_numeric(data[c]); y1=int(plan['year1']);y2=int(plan['year2'])
+            total_old=x[yrs==y1].sum();total_new=x[yrs==y2].sum()
+            if total_old==0:raise PlanError('No valid baseline year revenue')
+            result=(total_new/total_old-1)*(100 if plan.get('percent',True) else 1)
+        elif op=='difference':
+            g=_column(frame,plan,'group'); col=_column(frame,plan,'col');agg=plan.get('agg','mean')
+            values=_numeric(data[col]).groupby(data[g]).agg(agg)
+            keys=values.index.astype(str).str.lower().str.strip()
+            terms=[]
+            for target in ('target','target2'):
+                which=np.flatnonzero(keys==str(plan.get(target,'')).lower().strip())
+                if len(which)!=1 and 'meaning_'+g in data.columns:
+                    labels=data[[g,'meaning_'+g]].dropna().drop_duplicates()
+                    matched=labels.loc[_category_mask(labels,'meaning_'+g,plan.get(target)),g]
+                    if len(matched)==1:
+                        which=np.flatnonzero(keys==str(matched.iloc[0]).lower().strip())
+                if len(which)!=1:raise PlanError('Group for '+target+' not found')
+                terms.append(float(values.iloc[which[0]]))
+            result=terms[0]-terms[1]
+    if not math.isfinite(float(result)):raise PlanError('Nonfinite calculated result')
+    return float(result)
+
+
+def validate_semantics(task, plan, frame):
+    """Reject common omissions without claiming formal natural-language equivalence."""
+    q=task['objective'].lower()
+    op=plan.get('op')
+    if re.search(r'\b(?:per|by|across) (?:site|region|group|classification)s?\b|\bgroup readings\b|\bfor each site\b',q):
+        if op not in ('group','difference') and not re.search(r'\bat sites? (?:on|in|with|whose)\b',q):
+            raise PlanError('Question requires grouped aggregation')
+    if re.search(r'\b(?:what fraction|what percentage|percentage of|fraction of|percentage share)\b',q):
+        if op!='fraction':raise PlanError('Need a numerator and denominator for the requested fraction')
+        wants_percent='percentage' in q or re.search(r'\bpercent\b',q)
+        if bool(plan.get('percent',False))!=bool(wants_percent):
+            raise PlanError('Percent versus fraction scaling mismatch')
+    if re.search(r'\btotal\s+[\w -]{0,55}\s+divided by total\b',q) and op!='ratio':
+        raise PlanError('Question requires a ratio of paired column totals, not row-level ratios')
+    if re.search(r'\b(?:row by row|per record|per observation)\b',q) and re.search(r'\bdivided by\b',q) and op!='row_ratio':
+        if not (op=='profit' and plan.get('agg')=='per_row_mean'):
+            raise PlanError('Question requests a ratio on each row before averaging')
+    if 'percentage share' in q and 'total recorded revenue' in q:
+        if op!='fraction' or plan.get('agg')!='sum':
+            raise PlanError('Revenue share must divide the selected revenue sum by total revenue')
+    if re.search(r'\b(?:ranking|what rank)\b',q):
+        if op!='group' or plan.get('post')!='rank':
+            raise PlanError('Ranking requires group totals then descending rank')
+    if re.search(r'\b(?:overall profit|total profit)\b',q):
+        if op!='profit' or plan.get('agg')!='sum':
+            raise PlanError('Total profit requires the sum of paired revenue minus cost')
+    if re.search(r'\b(?:weighted average|weighted mean)\b',q) and op!='weighted':
+        raise PlanError('Weighted mean requires values and weights')
+    if re.search(r'\b(?:sample|population) standard deviation\b',q):
+        if op!='stat' or plan.get('agg') not in ('std','stdev','standard_deviation'):
+            raise PlanError('Use std sample/population aggregation')
+        if bool(plan.get('sample')) != bool('sample' in q):
+            raise PlanError('Sample std uses ddof=1, population std ddof=0')
+    if re.search(r'\b(?:second highest|second largest|second-highest|second-largest)\b',q):
+        if op!='group' or plan.get('post') not in ('second_max','second_highest'):
+            raise PlanError('Second-largest group aggregation needed')
+    if re.search(r'\b(?:distinct|unique|different sites)\b',q):
+        if op=='stat' and plan.get('agg') not in ('nunique','distinct','unique'):
+            raise PlanError('Distinct count needed')
+    if re.search(r'\b(?:growth|percent change|percentage change)\b',q) and op!='growth':
+        raise PlanError('Growth requires date-filtered totals of the two years')
+    if re.search(r'\b(?:row by row|per observation|per record)\b',q) and re.search(r'\b(?:ratio|divided|profit)\b',q):
+        if op not in ('row_ratio','profit'):
+            raise PlanError('Question requires per-row calculation')
+    # Check explicitly mentioned comparative thresholds against plan filters.
+    fs=plan.get('where',[])+plan.get('num_where',[])+plan.get('den_where',[])
+    if re.search(r'\bmedian\b',q) and not (op in ('stat','group') and plan.get('agg')=='median'):
+        raise PlanError('Question requests median aggregation')
+    if re.search(r'\b(?:range \(maximum minus minimum\)|interquartile range|\biqr\b)',q):
+        if op!='stat' or plan.get('agg') not in ('range','iqr','spread'):
+            raise PlanError('Question requests a range or an IQR')
+    if re.search(r'\b(?:pearson|spearman|correlation)\b',q):
+        if op!='correlation':raise PlanError('Question requests a correlation')
+        if 'spearman' in q and plan.get('method')!='spearman':raise PlanError('Use Spearman correlation')
+    if re.search(r'\b(?:missing|not recorded|recorded)\b',q) and op=='fraction':
+        checks=plan.get('num_where',[])
+        if 'missing' in q and not any(f.get('cmp') in ('isna','missing') for f in checks):
+            raise PlanError('Missing percentage needs an isna numerator filter')
+        if 'recorded' in q and 'not recorded' not in q and 'missing' not in q and not any(f.get('cmp') in ('notna','recorded') for f in checks):
+            if 'total recorded' not in q:
+                raise PlanError('Recorded percentage needs a notna numerator filter')
+    if re.search(r'\bbetween\s+(-?\d+(?:\.\d+)?)\s+and\s+(-?\d+(?:\.\d+)?)',q):
+        matched=re.search(r'\bbetween\s+(-?\d+(?:\.\d+)?)\s+and\s+(-?\d+(?:\.\d+)?)',q)
+        found=any(f.get('cmp')=='between' and str(f.get('value'))==matched[1] and str(f.get('value2'))==matched[2] for f in fs)
+        found=found or all(any(str(f.get('value'))==v for f in fs) for v in (matched[1],matched[2]))
+        if not found:raise PlanError('Missing two-sided between condition')
+    if re.search(r'\bafter\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b',q):
+        if not any(f.get('cmp') in ('after','on_or_after') for f in fs):
+            raise PlanError('Missing date-after filter')
+    if re.search(r'\b(?:for|as|among) (?:regular|trial|special)\b|\bclassified as (?:regular|trial|special)\b',q):
+        requested=re.findall(r'\b(?:regular|trial|special)\b',q)
+        all_values=[str(f.get('value','')).lower() for f in fs if isinstance(f,dict)] + [str(plan.get(k,'')).lower() for k in ('target','target2')]
+        if not all(any(label==v for v in all_values) for label in requested):
+            raise PlanError('Missing requested classification/category filter')
+    vals=[]
+    for f in fs:
+        if not isinstance(f,dict):continue
+        for v in (f.get('value'),f.get('value2')):
+            try:vals.append(float(v))
+            except (ValueError,TypeError):pass
+    for raw in re.findall(r'\b(?:strictly greater than|strictly less than|at least|at most|more than|over|below|above|under|greater than|less than)\s+(\d+(?:\.\d+)?)\b',q):
+        x=float(raw)
+        if not any(abs(x-y)<1e-10 for y in vals):
+            raise PlanError(f'Missing numeric threshold {raw}')
+    # Verify that any literal category mentioned in the question appears in a
+    # filter/target, rather than letting a plausible global statistic through.
+    used_categories={str(f.get('value','')).lower().strip() for f in fs if isinstance(f,dict)}
+    used_categories|={str(plan.get(k,'')).lower().strip() for k in ('target','target2')}
+    stop_labels={'day','date','row','total','all','mean','sum','yes','no','true','false','missing','flat'}
+    for code in frame.columns:
+        values=frame[code]
+        if pd.api.types.is_numeric_dtype(values) or values.nunique(dropna=True)>14:
+            continue
+        for label in values.dropna().astype(str).unique():
+            val=label.lower().strip()
+            if len(val)<3 or val in stop_labels or len(val)>35:
+                continue
+            if re.search(r'(?<!\w)'+re.escape(val)+r'(?!\w)',q) and val not in used_categories:
+                # A categorical GROUP target is the only alternative to filtering.
+                raise PlanError('Question names category '+repr(label)+'; add its filter or group target')
+    for yr in re.findall(r'\b(?:19|20)\d{2}\b',q):
+        if not any((f.get('cmp') in ('year','year_eq') and str(f.get('value'))==yr) or (f.get('cmp') in ('after','before','on_or_after','on_or_before') and str(f.get('value','')).startswith(yr)) for f in fs) and not (op=='growth' and yr in (str(plan.get('year1')),str(plan.get('year2')))):
+            raise PlanError(f'Missing year restriction {yr}')
+    return True
