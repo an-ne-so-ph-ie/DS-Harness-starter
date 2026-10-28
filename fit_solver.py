@@ -268,7 +268,7 @@ def solve_fit_task(task, model_suggested_columns=None):
     sc = {k.lower(): v for k, v in cols.items()}.get((sm[1] or sm[2]).strip()) if sm else None
     if sc is not None:
         unrec = lambda df: df.assign(**{sc: df[sc].mask(pd.to_numeric(df[sc], errors='coerce').eq(-1))}) if sc in df.columns else df
-    train, test = unrec(train), unrec(test)
+        train, test = unrec(train), unrec(test)
 
 
     # convert into training data (into numeric, normalizing etc) such that a regression can be perfomed
