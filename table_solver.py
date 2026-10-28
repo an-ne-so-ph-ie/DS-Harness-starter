@@ -251,7 +251,7 @@ def resolve_column(d, phrase, name=None, numeric=None, date=None, exclude=()):
         if numeric is not True or pd.api.types.is_numeric_dtype(series):
             if numeric is not False or not pd.api.types.is_numeric_dtype(series):
                 return suggested
-    query = re.sub(r'\s+(?:values?|columns?|fields?)$', '', query)
+    query = re.sub(r'\s+(?:values|columns?|fields?)$', '', query)
     if query.startswith('year of the '):
         query = query[len('year of the '):]
         date = True
@@ -281,6 +281,8 @@ def resolve_column(d, phrase, name=None, numeric=None, date=None, exclude=()):
             score += 12
         if query in description.lower() and len(query) >= 3:
             score += 4
+        if numeric is not False and re.search(r'\bidentifier\b|\bid\b', description.lower()) and not terms.intersection({'identifier', 'id'}):
+            score -= 6
         if date is True:
             score += 5 if 'date' in words or 'birth' in words or 'day' in words else -9
         if date is False and ('date' in words or 'birth' in words) and not terms.intersection({'date','birth','grant','listing'}):
@@ -834,17 +836,57 @@ def guard_unparsed_semantics(task, data, typ):
     if typ not in {'table.extra', 'table.derive'} and re.search(r'\b(?:percentage|percent) (?:growth|change|increase|decrease)\b', q):
         raise ValueError('Unparsed growth operation; use table model')
 
+_FULL_DATE = r'(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+[a-z]+\s+\d{4}|[a-z]+\s+\d{1,2},?\s+\d{4})'
+DATE_RESTRICTION = re.compile(
+    r'\b(?:of|for|among|over) (?:all )?the [a-z]+s\s+(?P<part>(?:(?:dated|recorded|made|placed|registered)\s+)?'
+    r'(?:(?:in|during) (?P<year>(?:19|20)\d\d)\b|(?P<cmp>on or after|on or before|after|before|since|until) (?P<date>' + _FULL_DATE + r')))')
+
+def question_sentence(text):
+    # get the sentence that holds the question
+    head = text.split('?')[0]
+    return re.split(r'(?<=[.!])\s+', head)[-1]
+
+def apply_date_restriction(d):
+    d.date_filtered = False
+    q = question_sentence(d.lower)
+    m = DATE_RESTRICTION.search(q)
+    if not m:
+        return
+    try:
+        col = resolve_column(d, 'date', date=True)
+    except ValueError:
+        return
+    frame = d.tables[d.main]
+    dates = date_column(frame, col, d.q)
+    if m['year']:
+        mask = dates.dt.year == int(m['year'])
+    else:
+        ref = pd.to_datetime(m['date'], errors='coerce')
+        if pd.isna(ref):
+            return
+        mask = {'after': dates > ref, 'before': dates < ref, 'on or after': dates >= ref, 'since': dates >= ref,
+                'on or before': dates <= ref, 'until': dates <= ref}[m['cmp']]
+    d.tables[d.main] = frame[mask.fillna(False)]
+    d.filters_used += 1
+    d.date_filtered = True
+    # remove the date phrase so later it is not read as part of a column name
+    d.lower = d.lower.replace(m['part'], '').replace('  ', ' ')
+    d.q = re.sub(re.escape(m['part']), '', d.q, count=1, flags=re.I).replace('  ', ' ')
+
 
 def unused_category_labels(d):
+    sentences=re.split(r'(?<=[.!?])\s+',d.lower)
+    scope=' '.join([question_sentence(d.lower)]+[s for s in sentences if re.search(r'consider only|among the|restrict|limited to',s)])
     bad=[]
     for cols in d.map.values():
         for desc in cols.values():
             if 'coded (' not in desc:continue
             for code,label in re.findall(r'\b([a-z]{1,4}\d+|[a-z]{2,4})\s+([^,]+)',desc.split('coded (',1)[1].split(')',1)[0]):
                 label=label.strip()
-                if len(label)>=3 and re.search(r'\b'+re.escape(label)+r'\b',d.lower):
+                if len(label)>=3 and re.search(r'\b'+re.escape(label)+r'\b',scope):
                     if not any(label in u or u in label or u==code for u in USED_VALUES):bad.append(label)
     return bad
+
 
 
 def solve_data(t, strict=True):
@@ -856,6 +898,7 @@ def solve_data(t, strict=True):
         raise ValueError('Not a table question')
     task['type'] = typ
     data = Data(task)
+    apply_date_restriction(data) 
     result = generic_table(data)
     if not strict:
         return result
@@ -868,6 +911,8 @@ def solve_data(t, strict=True):
             raise ValueError('Unapplied subset restriction')
         if re.search(r'\b(?:strictly greater than|strictly less than|at least|at most)\s+-?\d', q):
             raise ValueError('Unapplied numeric filter')
+        if re.search(r'\b(?:in|during|after|before|since|until)\s+(?:\d{1,2}\s+[a-z]+\s+|[a-z]+\s+\d{1,2},?\s+)?(?:19|20)\d\d\b', question_sentence(q)):
+            raise ValueError('Unapplied date restriction')
         bad = unused_category_labels(data)          
         if bad:
             raise ValueError('Unapplied category restriction: ' + ', '.join(bad))
