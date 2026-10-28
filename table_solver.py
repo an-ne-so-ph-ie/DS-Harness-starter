@@ -159,14 +159,14 @@ class Data:
         # drop duplicate if asked
         if re.search('duplicat|appear twice|count each .* once|one copy of each',self.lower):
             f=self.main
-            key=self.column('id',f, required=False)
-            if not key:
-                first=self.tables[f].columns[0]
-                description=self.map.get(f,{}).get(first,'')
-                if 'identifier' in description or description.endswith(' number'):
-                    key=first
+            frame=self.tables[f]; desc=self.map.get(f,{})
+            cands=[c for c in frame.columns if re.search(r'\bidentifier\b|\bid\b',desc.get(c,'')) or desc.get(c,'').endswith(' number')]
+            cands=cands or [c for c in frame.columns if c.lower()=='id']
+            cands=[c for c in cands if frame[c].nunique()>=0.5*len(frame)]
+            key=cands[0] if cands else None
             if key: self.tables[f] = self.tables[f].drop_duplicates(subset=[key])
             else: self.tables[f] = self.tables[f].drop_duplicates()
+
 
     def column(self, key, file=None, required=True):
         # find a CSV column using its name first, then its human-readable description
@@ -852,12 +852,14 @@ def apply_date_restriction(d):
     m = DATE_RESTRICTION.search(q)
     if not m:
         return
-    try:
-        col = resolve_column(d, 'date', date=True)
-    except ValueError:
-        return
     frame = d.tables[d.main]
-    dates = date_column(frame, col, d.q)
+    parsed = {c: date_column(frame, c, d.q) for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c])}
+    parsed = {c: s for c, s in parsed.items() if s.notna().sum() >= 0.8 * frame[c].notna().sum() > 0}
+    if len(parsed) > 1:
+        parsed = {c: s for c, s in parsed.items() if re.search(r'\bdate\b|\bday\b', d.map.get(d.main, {}).get(c, ''))}
+    if len(parsed) != 1:
+        return                                   
+    _, dates = next(iter(parsed.items()))
     if m['year']:
         mask = dates.dt.year == int(m['year'])
     else:
@@ -866,6 +868,7 @@ def apply_date_restriction(d):
             return
         mask = {'after': dates > ref, 'before': dates < ref, 'on or after': dates >= ref, 'since': dates >= ref,
                 'on or before': dates <= ref, 'until': dates <= ref}[m['cmp']]
+
     d.tables[d.main] = frame[mask.fillna(False)]
     d.filters_used += 1
     d.date_filtered = True
