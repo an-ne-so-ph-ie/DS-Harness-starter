@@ -84,8 +84,8 @@ to_ignore_words = {'the', 'of', 'a', 'an', 'to', 'for', 'in', 'and', 'with', 'by
 
 # get the pattern of a normal regression task, condition and question
 reg_sentence_pattern = re.compile(
-    r'fit an? (?P<model>[^.]*?regression)(?P<opts>[^.]*?) of (?:the )?(?P<target>.+?) on (?:the )?'
-    r'(?P<features>.+?), using (?:the )?[\w\s-]+? of train\.csv(?P<filter>[^.]*)\.', re.I | re.S)
+        r'fit an? (?P<model>[^.]*?regression)(?P<opts>[^.]*?) of (?:the )?(?P<target>.+?) on (?:the )?'
+    r'(?P<features>.+?),\s*using (?:(?:the |all )?[\w\s-]+? of )?(?:the )?train\.csv(?P<filter>(?:[^.]|\.(?=\d))*)\.', re.I | re.S)
 
 condition_pattern = re.compile(
     rf"(?:with an? |whose )(?P<col>.+?) (?:(?:of|is) (?P<year>\d{{4}}) or (?P<dir>earlier|later)"
@@ -260,8 +260,7 @@ def solve_fit_task(task, model_suggested_columns=None):
     target, feats, trf = spec['target'], spec['features'], spec['train_filter']
     #cols = resolve([target, *feats] + ([trf[0]] if trf else []), desc, allowed,
     #                df=train, binary=target if spec['logistic'] else None, numeric=feats)
-    cols = resolve([target, *feats] + ([trf[0][0]] if trf else []), desc, allowed,
-               df=train, binary=target if spec['logistic'] else None, numeric=feats)
+    cols = resolve([target, *feats] + [c[0] for c in trf], desc, allowed, df=train, binary=target if spec['logistic'] else None, numeric=feats)
     if len({cols[p] for p in [target, *feats]}) < len(feats) + 1:
         raise ValueError('two phrases point at the same column')
 
