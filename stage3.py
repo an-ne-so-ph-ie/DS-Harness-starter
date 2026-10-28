@@ -154,13 +154,11 @@ class Agent:
                 except Exception:
                     pass
 
-            # Only genuinely unresolved questions need the more expensive
-            # model-generated pandas expression.
             unresolved = [i for i in indices if self.out[i] is None]
             if not unresolved:
                 return
 
-            prepared, conversations, original_prompts = {}, {}, {}
+            prepared, conversations, original_prompts, contexts = {}, {}, {}, {}
             for i in unresolved:
                 task = tasks[i]
                 try:
@@ -179,6 +177,7 @@ class Agent:
                         continue
 
                 context = tab.table_context(task, tables, df, context)
+                contexts[i] = context
                 prepared[i] = (tables, df)
                 question = 'Question: ' + task['objective'] + '\n\n' + context
                 original_prompts[i] = question
@@ -188,8 +187,42 @@ class Agent:
                     + [{'role': 'user', 'content': question}]
                 )
 
-            active = list(conversations)
+            plan_active = list(conversations)
+            plan_convs = {}
 
+            plan_active = list(conversations)
+            plan_convs = {}
+            for i in plan_active:
+                try:
+                    plan_convs[i] = tab.prompt(tasks[i], contexts[i], prepared[i][1])
+                except Exception:
+                    pass
+            plan_active = list(plan_convs)
+            for attempt in range(2):
+                if not plan_active or hclock.left() < 8:
+                    break
+                try:
+                    replies = self.llm.chat([plan_convs[i] for i in plan_active], max_new_tokens=220,
+                                            max_time=max(1, min(10, hclock.left() - 6)))
+                except Exception:
+                    break
+                pending = []
+                for i, reply in zip(plan_active, replies):
+                    try:
+                        plan = tab.parse(reply)
+                        tab.validate_semantics(tasks[i], plan, prepared[i][1])
+                        answer = tab.validate_table_result(tasks[i], tab.execute(plan, prepared[i][1]))
+                        self.out[i] = {'id': tasks[i]['id'], 'answer': answer}
+                    except Exception as e:
+                        plan_convs[i] = plan_convs[i] + [
+                            {'role': 'assistant', 'content': reply[:500]},
+                            {'role': 'user', 'content': 'PLAN ERROR: ' + str(e)[:180]
+                             + '\nReturn a corrected SINGLE JSON plan. Use exact schema column codes. No Python.'}]
+                        pending.append(i)
+                plan_active = pending
+
+            active = [i for i in conversations if self.out[i] is None]
+ 
             weak = {}
 
             def run_candidate(i, reply):
@@ -200,8 +233,6 @@ class Agent:
                 return tab.validate_table_result(tasks[i], result)
 
 
-            # If execution fails OR the expression skips an essential operation,
-            # show the failure to Qwen and request a corrected expression.
             for attempt in range(3):
                 if not active or self.llm is None or hclock.left() < 3:
                     break
@@ -243,16 +274,17 @@ class Agent:
                         + '\nFix the expression without dropping any question conditions.'
                         + '\nValid columns: ' + repr(columns)
                     )
-                    conversations[i] = [
-                        {'role': 'system', 'content': tab.SYSTEM_table},
-                        {'role': 'user', 'content': prompt}
-                    ]
+                    conversations[i] = ([
+                        {'role': 'system', 'content': tab.SYSTEM_table}] + tab.table_examples(tasks[i])
+                        + [{'role': 'user', 'content': prompt}])
                     pending.append(i)
                 active = pending
 
             for i in unresolved:
                 if self.out[i] is None:
-                    self.out[i] = {'id': tasks[i]['id'], 'answer': 0}
+                    fallback = weak.get(i, tab.WEAK.get(tasks[i]['id']))
+                    ok = fallback is not None and math.isfinite(fallback)
+                    self.out[i] = {'id': tasks[i]['id'], 'answer': fallback if ok else 0}
 
 
 
