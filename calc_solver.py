@@ -186,7 +186,8 @@ def solve_inline(q):
 
 def solve_dates(q):
     md=re.search(r'('+DATE_PATTERN+r')\s+(?:to|and ends on)\s+('+DATE_PATTERN+r')',q)
-    if md and ('days' in q or 'long' in q):return days_between(md[1],md[2],'count both' in q)
+    if md and ('days' in q or 'long' in q):
+       return days_between(md[1],md[2],bool(re.search(r'count(?:ing)? both|inclusive|including both',q)))
     md=re.search(r'(\d+)\s+days after\s+('+DATE_PATTERN+r')',q)
     if md:return date_add(md[2],int(md[1]))
     md=re.search(r'(?:day of the week does|which day of the week does)\s+('+DATE_PATTERN+r')',q)
@@ -267,7 +268,8 @@ def solve_growth(q):
         money = re.search(r'([\d,.]+)\s+(?:euros|dollars)', q)
         rates = re.findall(r'(' + NUMBER_PATTERN + r')%', q)
         if money and len(rates) == 1:
-            return float(money[1].replace(',', '')) / (1 + float(rates[0]) / 100)
+            sign = -1 if re.search(r'\b(?:reduc\w*|discount\w*|sale|off|cheaper|lower\w*|decreas\w*|cut)\b', q) else 1
+            return float(money[1].replace(',', '')) / (1 + sign * float(rates[0]) / 100)
     changes = re.findall(r'\b(rises?|falls?|increases?|decreases?) by\s+(' + NUMBER_PATTERN + r')%', q)
     if changes and 'overall' in q:
         factors = [1 + (-1 if action.startswith(('fall', 'decrease')) else 1) * float(percent) / 100 for action, percent in changes]
@@ -275,7 +277,7 @@ def solve_growth(q):
     match = re.search(r'([\d,]+)\s+euros.*?(' + NUMBER_PATTERN + r')%\s+(?:compound interest|per year|every year|of its value every year).*?after\s+(\d+)\s+years', q)
     if match:
         initial, rate, years = match.groups()
-        rate = float(rate) / 100 * (-1 if 'loses' in q else 1)
+        rate = float(rate) / 100 * (-1 if re.search(r'\b(?:loses?|lost|depreciat\w*|declin\w*|decreas\w*|shrink\w*|drops?|falls?)\b', q) else 1)
         return float(initial.replace(',', '')) * (1 + rate) ** int(years)
     return None
 
