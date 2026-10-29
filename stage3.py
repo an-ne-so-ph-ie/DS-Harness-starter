@@ -66,7 +66,12 @@ class Agent:
     
     def solve(self, tasks, seconds=40.0):
         self.out = [None] * len(tasks)
-        try:                                              
+        try:   
+            import torch
+            torch.manual_seed(0)
+        except Exception:
+            pass
+        try:                                                                                         
             self.solve_fct(tasks, seconds)
         except Exception:
             report('solve')
