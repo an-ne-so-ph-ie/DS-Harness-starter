@@ -903,9 +903,114 @@ def unused_category_labels(d):
                     if not any(label in u or u in label or u==code for u in USED_VALUES):bad.append(label)
     return bad
 
+AGG = r'(mean|average|total|median|maximum|minimum|sum)'
+TAIL = r'\s*(?:\(in [^)]*\))?\s*\??$'
 
+def group_values(d, measure, group, how):
+    if re.search(r"\b(?:with|whose|that|where|between|and)\b|\d", measure + ' ' + group):
+        return None 
+    df = source_frame(d)                                        
+    mcol = resolve_column(d, measure, numeric=True)
+    gcol = resolve_column(d, re.sub(r's$', '', group.strip()), numeric=False)
+    if df[gcol].nunique() > min(50, 0.5 * len(df)):
+        return None                                          
+    vals = numeric_values(d, df, mcol)
+    g = vals.groupby(df[gcol]).agg(lambda x: aggregate_values(x, how))
+    return g.dropna()
+
+def category_rows(d, df, text):
+    for col, desc in d.map.get(d.main, {}).items():
+        if col in df.columns and 'coded (' in desc:
+            try:
+                m = category_mask(df, col, text, desc)
+                if m.fillna(False).any():
+                    return m.fillna(False)
+            except ValueError:
+                pass
+    return None
+
+def generic_compare(d):
+    q = question_sentence(d.lower)
+    m = re.search(r'what is the (second|third)[ -](largest|smallest) ' + AGG + r' (.+?) (?:among|across|of|over|between) (?:all )?(?:the )?([a-z ]+?)' + TAIL, q)
+    if m:
+        g = group_values(d, m[4], m[5], m[3])
+        if g is None or len(g) < 3:
+            return None
+        k = {'second': 1, 'third': 2}[m[1]]
+        return float(g.sort_values(ascending=(m[2] == 'smallest')).iloc[k])
+    m = re.search(r'what is the difference between the (largest|smallest) and (?:the )?(largest|smallest) ' + AGG + r' (.+?) (?:among|across|of|over|between) (?:all )?(?:the )?([a-z ]+?)' + TAIL, q)
+    if m and m[1] != m[2]:
+        g = group_values(d, m[4], m[5], m[3])
+        if g is None or len(g) < 2:
+            return None
+        return float(g.max() - g.min()) if m[1] == 'largest' else float(g.min() - g.max())
+    m = (re.search(r'what is the ' + AGG + r' (.+?) of (?:the )?(.+?) minus the ' + AGG + r' (.+?) of (?:the )?(.+?)' + TAIL, q)
+         or re.search(r'what is the difference between the ' + AGG + r' (.+?) of (?:the )?(.+?) and the ' + AGG + r' (.+?) of (?:the )?(.+?)' + TAIL, q))
+    if m and m[1] == m[4] and m[2] == m[5]:
+        if re.search(r"\b(?:with|whose|that|where)\b|\d", m[2]):
+            return None
+        df = source_frame(d)
+        col = resolve_column(d, m[2], numeric=True)
+        a, b = category_rows(d, df, m[3]), category_rows(d, df, m[6])
+        if a is None or b is None:
+            return None
+        d.filters_used += 1
+        vals = numeric_values(d, df, col)
+        return aggregate_values(vals[a], m[1]) - aggregate_values(vals[b], m[4])
+    return None
+
+def generic_count(d):
+    q = question_sentence(d.lower)
+    if re.search(r'missing|not recorded|no recorded|distinct|different|percentage|fraction|per |each|average|mean', q):
+        return None
+    m = re.search(r"how many ([a-z]+?) (?:are there )?(?:have|has|with|whose|that)\s+(.+?)(?:\s+are there)?\s*\??$", q)
+    if not m or 'at least one' in m[2]:
+        return None
+    noun = m[1].rstrip('s')                                 
+    if any(desc.startswith(noun) for desc in d.map.get(d.main, {}).values() if 'coded (' in desc):
+        return None
+    cond = re.sub(r"\s+of\s+(['\"])", r" is \1", m[2])        
+    df = source_frame(d)
+    mask = filter_mask(d, df, cond)
+    return float(pd.Series(mask).fillna(False).astype(bool).sum())
+
+def solve_new_patterns(t, strict=True):
+    #checking out the added deterministic paths (counting and comparisons)
+    USED_VALUES.clear()
+    task = {**t, 'objective': normalize_question(t['objective'])}
+    task['type'] = task.get('type') or infer_type(task)
+    if not task['type'].startswith('table.') or task['type'] == 'table.join':
+        return None
+    data = Data(task)
+    apply_date_restriction(data)
+    for fn in (generic_compare, generic_count):
+        try:
+            result = fn(data)
+        except (ValueError, KeyError):
+            result = None
+        if result is None or not np.isfinite(result):
+            continue
+        q = question_sentence(data.lower)
+        if strict and not data.date_filtered and re.search(r'\b(?:in|during|after|before|since|until)\s+(?:\d{1,2}\s+[a-z]+\s+|[a-z]+\s+\d{1,2},?\s+)?(?:19|20)\d\d\b', q):
+            return None
+        if strict and unused_category_labels(data):
+            return None
+        return result
+    return None
 
 def solve_data(t, strict=True):
+    #if solve_data fails, then other deterministic ways are tried
+    try:
+        return solve_data_old(t, strict)
+    except Exception:
+        result = solve_new_patterns(t, strict)
+        if result is None:
+            raise
+        return result
+
+
+
+def solve_data_old(t, strict=True):
     # Infer the operation after standardizing wording, not before.
     USED_VALUES.clear()
     task = {**t, 'objective': normalize_question(t['objective'])}
