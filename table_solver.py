@@ -163,6 +163,14 @@ class Data:
             cands=[c for c in frame.columns if re.search(r'\bidentifier\b|\bid\b',desc.get(c,'')) or desc.get(c,'').endswith(' number')]
             cands=cands or [c for c in frame.columns if c.lower()=='id']
             cands=[c for c in cands if frame[c].nunique()>=0.5*len(frame)]
+            if not cands:
+                old = self.column('id',f, required=False)
+                if not old:
+                    first = frame.columns[0]; d0=desc.get(first,'')
+                    if 'identifier' in d0 or d0.endswith(' number'): 
+                        old=first
+                if old and frame[old].nunique() >= 0.5*len(frame): 
+                    cands=[old]
             key=cands[0] if cands else None
             if key: self.tables[f] = self.tables[f].drop_duplicates(subset=[key])
             else: self.tables[f] = self.tables[f].drop_duplicates()
@@ -857,9 +865,14 @@ def apply_date_restriction(d):
     parsed = {c: s for c, s in parsed.items() if s.notna().sum() >= 0.8 * frame[c].notna().sum() > 0}
     if len(parsed) > 1:
         parsed = {c: s for c, s in parsed.items() if re.search(r'\bdate\b|\bday\b', d.map.get(d.main, {}).get(c, ''))}
-    if len(parsed) != 1:
-        return                                   
-    _, dates = next(iter(parsed.items()))
+    if len(parsed) == 1:
+         _, dates = next(iter(parsed.items()))    
+    else: 
+        try:
+            col = resolve_column(d, 'date', date=True)
+        except ValueError:
+            return
+        dates = date_column(frame, col, d.q)                  
     if m['year']:
         mask = dates.dt.year == int(m['year'])
     else:
