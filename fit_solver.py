@@ -232,7 +232,7 @@ def solve_fit_task(task, model_suggested_columns=None):
         # if still unclear, then an llm will be asked
         unclear = [ph for ph in phrases if ph not in out]
         if unclear:
-            raise Unclear(unclear, {c: desc[c] for c in allowed if c not in out.values()})
+            raise Unclear(unclear, {c: desc[c] for c in allowed})
         return out
 
     def where(df, cond, col):
