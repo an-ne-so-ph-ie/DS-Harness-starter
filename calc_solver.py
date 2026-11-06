@@ -151,7 +151,7 @@ def has_word(q,*words): # make sure assume is not taken if looking for "sum"
 
 
 def solve_inline(q):
-    if 'weighted mean' in q and 'coefficient' in q:
+    if ('weighted mean' in q or 'weighted average' in q) and 'coefficient' in q:
         pairs=re.findall(r'(-?\d+(?:\.\d+)?)\s+(?:in|for)\s+[^()]*?\(coefficient\s+(\d+)\)',q)
         if len(pairs)>=2:
             w=[(float(x),int(y)) for x,y in pairs]
@@ -162,12 +162,18 @@ def solve_inline(q):
             m=re.search(r'(?:strictly above|greater than)\s+('+NUMBER_PATTERN+r')',q)
             if m:
                 return sum(x>float(m[1]) for x in values)
+        if 'strictly below' in q or 'less than' in q or 'smaller than' in q:
+            m=re.search(r'(?:strictly below|less than|smaller than)\s+('+NUMBER_PATTERN+r')',q)
+            if m:
+                return sum(x<float(m[1]) for x in values)
+        if has_word(q,'range') and not has_word(q,'interquartile'):
+            return max(values)-min(values)
         if has_word(q,'absolute deviation','geometric','harmonic','trimmed','mode','percentile','quartile','interquartile',
                     'skewness','kurtosis','correlation','covariance','weighted','squares?','squared','cumulative'):
             return None
         if re.search(r'\b(?:above|below|over|under)\s+the\s+(?:mean|average|median)\b',q):
             return None
-        if has_word(q,'how many') and not re.search(r'strictly above|greater than',q):
+        if has_word(q,'how many') and not re.search(r'strictly above|greater than|strictly below|less than|smaller than',q):
             return None
         if has_word(q,'variance'):
             return statistics.pvariance(values) if 'population' in q or 'divide by n' in q else statistics.variance(values)
@@ -185,12 +191,14 @@ def solve_inline(q):
     return None
 
 def solve_dates(q):
-    md=re.search(r'('+DATE_PATTERN+r')\s+(?:to|and ends on)\s+('+DATE_PATTERN+r')',q)
-    if md and ('days' in q or 'long' in q):
+    md=re.search(r'('+DATE_PATTERN+r')\s+(?:to|and ends on|and|until|through)\s+('+DATE_PATTERN+r')',q)
+    if md and ('days' in q or 'long' in q or 'last' in q):
        return days_between(md[1],md[2],bool(re.search(r'count(?:ing)? both|inclusive|including both',q)))
     md=re.search(r'(\d+)\s+days after\s+('+DATE_PATTERN+r')',q)
     if md:return date_add(md[2],int(md[1]))
-    md=re.search(r'(?:day of the week does|which day of the week does)\s+('+DATE_PATTERN+r')',q)
+    md=re.search(r'(\d+)\s+days before\s+('+DATE_PATTERN+r')',q)
+    if md:return date_add(md[2],-int(md[1]))
+    md=re.search(r'(?:day of the week does|which day of the week does|day of the week is|day of the week was|weekday of)\s+('+DATE_PATTERN+r')',q)
     if md:return weekday(md[1])
     return None
 
@@ -211,10 +219,10 @@ def solve_probability(q):
             size=int(n[2]) if n[2].isdigit() else faces.get(n[2])
             if size:
                 return as_percent_if_asked(q,dice_sum(int(n[1]),int(total[1]),size))
-    if 'probability' in q and ('defective' in q or 'success' in q or 'fails' in q):
+    if 'probability' in q and ('defective' in q or 'success' in q or 'fails' in q or 'faulty' in q):
         prob=re.search(r'probability\s+('+NUMBER_PATTERN+r')',q)
-        count=re.search(r'(?:among|out of|in)\s+(\d+)\s+(?:parts|trials|items|attempts)',q)
-        threshold=re.search(r'(at least|at most|exactly)\s+(\d+)\s+(?:defective|success|fail)',q)
+        count=re.search(r'(?:among|out of|in|of)\s+(\d+)\s+(?:parts|trials|items|attempts|units|pieces|components)',q)
+        threshold=re.search(r'(at least|at most|exactly)\s+(\d+)\s+(?:defective|success|fail|faulty)',q)
         if prob and count and threshold:
             p=float(prob[1]);n=int(count[1]);k=int(threshold[2])
             if threshold[1]=='at least':
@@ -240,8 +248,23 @@ def solve_numbers(q):
     if m:return math.log(float(m[1]))
     m=re.search(r'e raised to the power\s+('+NUMBER_PATTERN+r')',q)
     if m:return math.exp(float(m[1]))
-    m=re.search(r'('+NUMBER_PATTERN+r')\s+raised to the power\s+(\d+)(?:\s*/\s*(\d+))?',q)
-    if m:return float(m[1])**(int(m[2])/int(m[3]) if m[3] else int(m[2]))
+    m=re.search(r'('+NUMBER_PATTERN+r')\s+raised to the power\s+(-?\d+(?:\.\d+)?)(?:\s*/\s*(\d+))?',q)
+    if m:return float(m[1])**(float(m[2])/int(m[3]) if m[3] else float(m[2]))
+    m=re.search(r'(?:cube root of|third root of)\s+('+NUMBER_PATTERN+r')',q)
+    if m:return float(m[1])**(1/3)
+    m=re.search(r'(?:base-2 logarithm|logarithm in base 2|log2|binary logarithm) of\s+('+NUMBER_PATTERN+r')',q)
+    if m:return math.log2(float(m[1]))
+    m=re.search(r'(?:greatest common divisor|gcd|highest common factor) of\s+(\d+)\s+and\s+(\d+)',q)
+    if m:return math.gcd(int(m[1]),int(m[2]))
+    m=re.search(r'(?:^|\s)(\d+)\s+factorial\b|factorial of\s+(\d+)',q)
+    if m:return math.factorial(int(m[1] or m[2]))
+    m=re.search(r'(?:remainder|modulo) when\s+(\d+)\s+is divided by\s+(\d+)',q)
+    if m:return int(m[1])%int(m[2])
+    m=re.search(r'(?:committee|group|team|delegation|sample) of (\d+).*?(?:from|out of|among)\s+(\d+)',q)
+    if m and re.search(r'order does not matter|chosen|selected|picked',q):return math.comb(int(m[2]),int(m[1]))
+    m=re.search(r'arrange (\d+) items.*?from (\d+)|(\d+) items.*?from (\d+) distinct items in order',q)
+    if m:
+        k,n=(m[1],m[2]) if m[1] else (m[3],m[4]);return math.perm(int(n),int(k))
     m=re.search(r'(?:least common multiple|lcm) of\s+(\d+)\s+and\s+(\d+)',q)
     if m:return math.lcm(int(m[1]),int(m[2]))
     m=re.search(r'(?:remainder|modulo) of (?:the division of\s+)?(\d+) by (\d+)',q)
@@ -255,6 +278,20 @@ def solve_numbers(q):
     if m and ('order does not matter' in q or 'chosen' in q):return math.comb(int(m[2]),int(m[1]))
     return None
 
+def solve_percent_simple(q):
+    m=re.search(r'what is\s+('+NUMBER_PATTERN+r')\s*%\s+of\s+('+NUMBER_PATTERN+r')',q)
+    if m:return float(m[1])/100*float(m[2])
+    m=re.search(r'what percentage of\s+('+NUMBER_PATTERN+r')\s+is\s+('+NUMBER_PATTERN+r')',q)
+    if m and float(m[1])!=0:return 100*float(m[2])/float(m[1])
+    m=re.search(r'('+NUMBER_PATTERN+r')\s+(?:euros|dollars)?\s*is\s+(reduced|increased|raised|lowered|cut|marked up|marked down|discounted)\s+by\s+('+NUMBER_PATTERN+r')\s*%',q)
+    if m and re.search(r'new price|new amount|new value|new salary|after the (?:change|increase|decrease|discount)',q):
+        sign=-1 if m[2] in ('reduced','lowered','cut','marked down','discounted') else 1
+        return float(m[1])*(1+sign*float(m[3])/100)
+    m=re.search(r'(?:invoice|bill|price|amount) of\s+([\d,.]+)\s+(?:euros|dollars)\s+includes vat at\s+('+NUMBER_PATTERN+r')%',q)
+    if m and re.search(r'vat amount|amount of vat|how much vat|the vat\b',q) and 'before vat' not in q:
+        total=float(m[1].replace(',',''));return total-total/(1+float(m[2])/100)
+    return None
+
 def solve_growth(q):
     match = re.search(r'(?:grew|went|increased|decreased) from\s+(' + NUMBER_PATTERN + r')\s+to\s+(' + NUMBER_PATTERN + r')', q)
     if match:
@@ -264,7 +301,7 @@ def solve_growth(q):
             return 100 * ((new / old) ** (1 / int(years[1])) - 1)
         if 'percent' in q:
             return 100 * (new / old - 1)
-    if any(term in q for term in ('original price', 'before tax', 'before vat', 'amount before vat')):
+    if any(term in q for term in ('original price', 'before tax', 'before vat', 'amount before vat', 'original amount', 'original salary', 'price before')):
         money = re.search(r'([\d,.]+)\s+(?:euros|dollars)', q)
         rates = re.findall(r'(' + NUMBER_PATTERN + r')%', q)
         if money and len(rates) == 1:
@@ -274,10 +311,10 @@ def solve_growth(q):
     if changes and 'overall' in q:
         factors = [1 + (-1 if action.startswith(('fall', 'decrease')) else 1) * float(percent) / 100 for action, percent in changes]
         return 100 * (math.prod(factors) - 1)
-    match = re.search(r'([\d,]+)\s+euros.*?(' + NUMBER_PATTERN + r')%\s+(?:compound interest|per year|every year|of its value every year).*?after\s+(\d+)\s+years', q)
+    match = re.search(r'([\d,]+)\s+(?:euros|dollars|people|inhabitants|units|residents|members)?.*?(' + NUMBER_PATTERN + r')%\s+(?:compound interest|per year|every year|of its value every year|a year|annually|per annum).*?after\s+(\d+)\s+years', q)
     if match:
         initial, rate, years = match.groups()
-        rate = float(rate) / 100 * (-1 if re.search(r'\b(?:loses?|lost|depreciat\w*|declin\w*|decreas\w*|shrink\w*|drops?|falls?)\b', q) else 1)
+        rate = float(rate) / 100 * (-1 if re.search(r'\b(?:loses?|lost|depreciat\w*|declin\w*|decreas\w*|shrink\w*|drops?|falls?|reduc\w*)\b', q) else 1)
         return float(initial.replace(',', '')) * (1 + rate) ** int(years)
     return None
 
@@ -307,7 +344,7 @@ def solve_general_word_math(q):
     if re.search(r'\b(?:pump|tap|pipe|leak|drain|fill|empty)\b',q) and 'hour' in q:
         filling=re.findall(r'\bfills?\b.{0,50}?\bin\s+(\d+(?:\.\d+)?)\s+hours?',q)
         draining=re.findall(r'\bempt(?:y|ies|ied)\b.{0,50}?\bin\s+(\d+(?:\.\d+)?)\s+hours?',q)
-        if filling and draining and 'how many hours' in q:
+        if filling and 'how many hours' in q and (draining or len(filling)>=2) and re.search(r'\b(?:both|all|together|at the same time)\b',q):
             net=sum(1/float(x) for x in filling)-sum(1/float(x) for x in draining)
             if net>0:
                 return 1/net
@@ -320,6 +357,9 @@ def solve_general_word_math(q):
         if all((workers,hours,weeks)) and 'total paid' in q:
             return int(workers[1])*(float(hours[1])*float(hours[2])*int(weeks[1])+(float(bonuses[1]) if bonuses else 0))
 
+    speed=re.search(r'travels\s+('+NUMBER_PATTERN+r')\s*(km|miles|m|metres|kilometres)\s+in\s+('+NUMBER_PATTERN+r')\s*(hours?|minutes?|seconds?)',q)
+    if speed and 'average speed' in q and float(speed[3])>0:
+        return float(speed[1])/float(speed[3])
     conversion=re.search(r'\b1\s+([a-z]+)\s*=\s*(\d+(?:\.\d+)?)\s+([a-z]+)\b',q)
     desired=re.search(r'\bconvert\s+(\d+(?:\.\d+)?)\s+([a-z]+)\s+to\s+([a-z]+)',q)
     if conversion and desired:
@@ -367,7 +407,7 @@ def solve_general_growth(q):
 
 def calc_general(task):
     q=task['objective'].lower().replace('−','-').replace('×','*').replace('÷','/').replace('√','sqrt ')
-    for func in (solve_general_word_math,solve_general_probability,solve_general_growth,solve_dates,solve_probability,solve_inline,solve_growth,solve_numbers):
+    for func in (solve_general_word_math,solve_general_probability,solve_general_growth,solve_dates,solve_probability,solve_inline,solve_growth,solve_percent_simple,solve_numbers):
         try:
             value=func(q)
             if value is not None and math.isfinite(float(value)):
