@@ -163,6 +163,7 @@ class Data:
             cands=[c for c in frame.columns if re.search(r'\bidentifier\b|\bid\b',desc.get(c,'')) or desc.get(c,'').endswith(' number')]
             cands=cands or [c for c in frame.columns if c.lower()=='id']
             cands=[c for c in cands if frame[c].nunique()>=0.5*len(frame)]
+            cands=sorted(cands, key=lambda c: (frame[c].nunique(), not re.search(r'\bidentifier\b|\bid\b', desc.get(c,''))), reverse=True)
             if not cands:
                 old = self.column('id',f, required=False)
                 if not old:
@@ -325,10 +326,67 @@ def clean_frame(d,frame,name):
 
 
 USED_VALUES=[]   
-WEAK={}          
+WEAK={}   
+
+DATE_VERB = r'(?:born|[a-z]{3,}ed)'
+DATE_CMP = r'(?:on or after|on or before|after|before|since|until|in|during)'
+VERB_STEMS = {'born': ['birth'], 'recorded': ['record', 'read'], 'dated': ['date'], 'made': ['date'],
+              'admitted': ['admi'], 'delivered': ['deliver'], 'shipped': ['ship'], 'granted': ['grant'],
+              'placed': ['plac'], 'listed': ['list'], 'registered': ['regist'], 'signed': ['sign'],
+              'opened': ['open'], 'closed': ['clos'], 'issued': ['issu'], 'booked': ['book'],
+              'hired': ['hir'], 'sold': ['sale', 'sold'], 'paid': ['pay', 'paid'], 'started': ['start'],
+              'ended': ['end'], 'created': ['creat'], 'joined': ['join'], 'received': ['receiv', 'receipt']}
+
+def date_candidates(d, name=None):
+    name = name or d.main
+    frame = d.tables[name]
+    out = {}
+    for c in frame.columns:
+        if pd.api.types.is_numeric_dtype(frame[c]):
+            continue
+        s = date_column(frame, c, d.q)
+        if frame[c].notna().sum() > 0 and s.notna().sum() >= 0.8 * frame[c].notna().sum():
+            out[c] = s
+    return out
+
+def pick_date_column(d, head, name=None):
+    name = name or d.main
+    head = re.sub(r'^(?:with |the |a |an |whose )+', '', str(head).lower().strip())
+    cands = date_candidates(d, name)
+    desc = d.map.get(name, {})
+    if re.search(r'\bdate\b|\bday\b|\bbirth\b', head):
+        try:
+            col = resolve_column(d, head, name, date=True)
+            if col in cands or not cands:
+                return col
+        except ValueError:
+            pass
+    stems = VERB_STEMS.get(head, [])
+    if not stems:
+        base = re.sub(r'(?:ed|d)$', '', head)
+        stems = [base[:4]] if len(base) >= 3 else []
+    hits = [c for c in cands if any(st in desc.get(c, '').lower() or st in c.lower() for st in stems)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(cands) == 1:
+        return next(iter(cands))
+    raise ValueError(f'Ambiguous date column for {head!r}: {list(cands)}')
+
+def date_mask(dates, cmp, value):
+    v = str(value).strip()
+    if re.fullmatch(r'\d{4}', v) and cmp in ('in', 'during'):
+        return dates.dt.year.eq(int(v))
+    if re.fullmatch(r'[a-z]+\s+\d{4}', v) and cmp in ('in', 'during'):
+        ref = pd.to_datetime(v)
+        return (dates.dt.year == ref.year) & (dates.dt.month == ref.month)
+    ref = pd.to_datetime(v, errors='coerce')
+    if pd.isna(ref):
+        raise ValueError('Unreadable date ' + v)
+    return {'on or after': dates >= ref, 'since': dates >= ref, 'after': dates > ref, 'before': dates < ref,
+            'on or before': dates <= ref, 'until': dates <= ref, 'in': dates.eq(ref), 'during': dates.eq(ref)}[cmp]
 
 
-def category_mask(df, col, value, desc=''):
+def category_mask(df, col, value, desc='', full=None):
     USED_VALUES.append(str(value).strip().lower())
     s=df[col].astype('string').str.strip().str.lower()
     v=str(value).strip().lower()
@@ -340,7 +398,16 @@ def category_mask(df, col, value, desc=''):
     labels=re.findall(r'\b([a-z]+\d+|[a-z]{2,4})\s+([^,;()]+)',desc.lower())
     for code,label in labels:
         if v in label or label.strip() in v:return s.eq(code)
+    parts=v.split()
+    noun_words=word_tokens(desc)|word_tokens(col)
+    while len(parts)>1 and (parts[-1] in noun_words or parts[-1].rstrip('s') in noun_words):
+        parts=parts[:-1]; v2=' '.join(parts)
+        if s.eq(v2).any():return s.eq(v2)
     if s.str.contains(re.escape(v),regex=True,na=False).any():return s.str.contains(re.escape(v),regex=True,na=False)
+    if re.search(r'[(/,]\s*'+words+r'\s*[)/,]',desc.lower()):
+        return s.eq(v)
+    if full is not None and full.astype('string').str.strip().str.lower().eq(v).any():
+        return s.eq(v)
     raise ValueError(f'Cannot map categorical value {value!r} to {col!r}')
 
 
@@ -350,30 +417,23 @@ def filter_mask(d,df,phrase,name=None):
     text=str(phrase).lower().strip(' ,.?!')
     text=re.sub(r'^(?:the |a |an |with |of |whose |that |have |has )+', '',text)
     desc=d.map.get(name,{})
+    full=lambda col: d.tables[name][col] if col in d.tables[name].columns else None
     m=re.search(r"(?:whose |with |the |a )?([\w\s-]+?)\s+(?:field\s+)?(?:is|equals|as)\s+['\"]([^'\"]+)['\"]",text)
     if m:
         col=resolve_column(d,m[1],name)
-        return category_mask(df,col,m[2],desc.get(col,''))
+        return category_mask(df,col,m[2],desc.get(col,''),full(col))
     m=re.search(r"['\"]([^'\"]+)['\"]\s+(?:as|in)\s+(?:the\s+)?(.+?)(?:\s+field)?$",text)
     if m:
         col=resolve_column(d,m[2],name)
-        return category_mask(df,col,m[1],desc.get(col,''))
+        return category_mask(df,col,m[1],desc.get(col,''),full(col))
     m=re.search(r'([\w\s-]+?)\s+(?:field\s+)?(?:is|equals|as)\s+([yn])\b',text)
     if m:
         col=resolve_column(d,m[1],name)
-        return category_mask(df,col,m[2],desc.get(col,''))
-    m=re.search(r'\b(?:born|listed|shipped|delivered|delivery date|shipment date|listing date|birth date)\s+(on or after|before|in)\s+('+DATE_TEXT_PATTERN+r')',text)
-    if m:
-        which=m.group(0).split(' '+m.group(1))[0].strip()
-        word={'born':'birth','listed':'listing date','shipped':'shipment date','delivered':'delivery date'}.get(which,which)
-        col=resolve_column(d,word,name,date=True)
-        s=date_column(df,col,d.q)
-        v=m.group(2)
-        if re.fullmatch(r'\d{4}',v):return s.dt.year.eq(int(v))
-        if re.fullmatch(r'[a-z]+\s+\d{4}',v):
-            dt=pd.to_datetime(v);return (s.dt.year==dt.year)&(s.dt.month==dt.month)
-        v=pd.to_datetime(v)
-        return s>=v if m[1]=='on or after' else s<v if m[1]=='before' else s.eq(v)
+        return category_mask(df,col,m[2],desc.get(col,''),full(col))
+    m=re.match(r'(?P<head>(?:[\w-]+\s+){0,4}?[\w-]+)\s+(?P<cmp>'+DATE_CMP+r')\s+(?P<date>'+DATE_TEXT_PATTERN+r')(?=\s|$|[,.?])',text)
+    if m and (re.search(r'\bdate\b|\bday\b|\bbirth\b',m['head']) or re.fullmatch(DATE_VERB,m['head'])):
+        col=pick_date_column(d,m['head'],name)
+        return date_mask(date_column(df,col,d.q),m['cmp'],m['date'])
     m=re.search(r'(.+?)\s+'+COMPARISON_PATTERN+r'\s+(-?\d+(?:\.\d+)?)(?:\s+(?:kg|km|months|years|metres|square|euros|points|percent|%|half-days))?',text)
     if m:
         key,op,value=m[1],m[2],float(m[3])
@@ -393,6 +453,22 @@ def filter_mask(d,df,phrase,name=None):
         for code,label in matches:
             if label.strip() and re.search(r'\b'+re.escape(label.strip())+r'\b',text):
                 return category_mask(df,col,label.strip(),dcol)
+    hits=[]
+    for col in d.tables[name].columns:
+        series=d.tables[name][col]
+        if pd.api.types.is_numeric_dtype(series) or col not in df.columns:continue
+        values=series.dropna().astype('string').str.strip().unique()
+        if not 1<len(values)<=min(50,max(2,0.5*len(series))):continue
+        for v in values:
+            lv=str(v).lower()
+            if len(lv)>=3 and re.search(r'\b'+re.escape(lv)+r'\b',text):
+                noun=bool(word_tokens(desc.get(col,''))&word_tokens(text))
+                hits.append((noun,col,str(v)))
+    if hits:
+        best=[h for h in hits if h[0]] or hits
+        if len(best)==1:
+            _,col,v=best[0]
+            return category_mask(df,col,v,desc.get(col,''),full(col))
     raise ValueError('Unsupported filter '+text)
 
 
@@ -476,17 +552,15 @@ def generic_derive(d):
         col=resolve_column(d,m[1],d.main,numeric=True)
         factor=float(m[3]);v=numeric_values(d,df,col)*(1/factor if 'tonne' in m[2] else factor)
     filtered = False
-    m=re.search(r'over the\s+\w+\s+(?:with|listed|shipped|born)\s+(.+?)\s*\(',q)
+    m=re.search(r'over (?:all )?the\s+\w+\s+(?P<kw>with|whose|of|'+DATE_VERB+r')\s+(?P<rest>.+?)\s*\(',q)
     if m:
-        text=m[1]
-        if 'listed' in m[0]:text='listed '+text
-        if 'shipped' in m[0]:text='shipped '+text
-        if 'born' in m[0]:text='born '+text
+        text=m['rest'] if m['kw'] in ('with','whose','of') else m['kw']+' '+m['rest']
         v=v.loc[filter_mask(d,df,text)]
         filtered = True
-    m=re.search(r'over the\s+\w+\s+(?:with|listed|shipped|born)\s+(.+?)\?',q)
-    if m and not filtered and not re.search(r'\b(?:round|report|give)\b',m[1]):
-        text = re.sub(r'\s*\([^)]*\)\s*$', '', m[1]).strip()
+    m=re.search(r'over (?:all )?the\s+\w+\s+(?P<kw>with|whose|of|'+DATE_VERB+r')\s+(?P<rest>.+?)\?',q)
+    if m and not filtered and not re.search(r'\b(?:round|report|give)\b',m['rest']):
+        text = re.sub(r'\s*\([^)]*\)\s*$', '', m['rest']).strip()
+        text = text if m['kw'] in ('with','whose','of') else m['kw']+' '+text
         v = v.loc[filter_mask(d,df,text)]
     m=re.search(r'what is its\s+(maximum|minimum|median|mean|average|largest|smallest)',q)
     if not m:raise ValueError('No derived aggregation')
@@ -496,10 +570,10 @@ def generic_derive(d):
 def generic_filter(d):
     q=d.lower
     df=source_frame(d)
-    m=re.search(r'among the\s+\w+\s+(?:with|whose|of|born|shipped)\s+(.+?),\s+what\s+(percentage|fraction)(?:\s+\(between 0 and 1\))?\s+(?:have|belong|were|are)\s+(.+?)\?',q)
+    m=re.search(r'among the\s+\w+\s+(?:with|whose|of|'+DATE_VERB+r')\s+(.+?),\s+what\s+(percentage|fraction)(?:\s+\(between 0 and 1\))?\s+(?:have|belong|were|are)\s+(.+?)\?',q)
     if m:
         between=re.search(r'among the\s+\w+\s+(.+?),\s*what',q)[1]
-        before=between if between.startswith(('born','shipped','listed')) else re.sub(r'^(?:with|whose|of)\s+','',between)
+        before=re.sub(r'^(?:with|whose|of)\s+','',between) if re.match(r'(?:with|whose|of)\s',between) else between
         df2=df.loc[filter_mask(d,df,before)]
         after=m[3]
         after=re.sub(r'^(?:(?:to|in|the)\s+)+','',after)
@@ -508,21 +582,19 @@ def generic_filter(d):
     m=re.search(r'what\s+(percentage|fraction)(?:\s+\(between 0 and 1\))?\s+(?:have|belong|were|are)\s+(.+?)\?',q)
     if m:
         return float(filter_mask(d,df,m[2]).mean()*(100 if m[1]=='percentage' else 1))
-    m=re.search(r'how many\s+\w+\s+(?:born|listed|with|whose|that|of)\s+(.+?)\?',q)
+    m=re.search(r'how many\s+\w+\s+(?P<kw>with|whose|that|of|'+DATE_VERB+r')\s+(?P<rest>.+?)(?:\s+are there)?\?',q)
     if m:
-        f='born '+m[1] if 'born' in m[0] else m[1]
+        f=m['rest'] if m['kw'] in ('with','whose','that','of') else m['kw']+' '+m['rest']
         return float(filter_mask(d,df,f).sum())
     how,metric=requested_metric(q)
     tail=q[q.find('what is the '):] if 'what is the ' in q else q
-    m=re.search(r'\b(?:of the|over the)\s+\w+\s+(?:with|whose|that|shipped|born)\s+(.+?)\s*(?:\(|\?)',tail)
+    m=re.search(r'\b(?:of the|over the)\s+\w+\s+(?P<kw>with|whose|that|'+DATE_VERB+r')\s+(?P<rest>.+?)\s*(?:\(|\?)',tail)
     if not m:
-        m=re.search(r'\b(?:of the|over the)\s+\w+\s+of (?:the )?(.+?)\s*(?:\(|\?)',tail)
+        m=re.search(r'\b(?:of the|over the)\s+\w+\s+(?P<kw>of) (?:the )?(?P<rest>.+?)\s*(?:\(|\?)',tail)
     if m:
-        filt=m[1]
-        if 'shipped' in m[0]:filt='shipped '+filt
-        if 'born' in m[0]:filt='born '+filt
+        filt=m['rest'] if m['kw'] in ('with','whose','that','of') else m['kw']+' '+m['rest']
         df=df.loc[filter_mask(d,df,filt)]
-    elif re.search(r'\b(?:of|over) the\s+\w+\s+(?:with|whose|that|born|shipped|listed)\b', tail):
+    elif re.search(r'\b(?:of|over) the\s+\w+\s+(?:with|whose|that|'+DATE_VERB+r')\b', tail):
         # Never answer a restricted statistic using the entire table.
         raise ValueError('Unparsed filter; needs LLM fallback')
     col=resolve_column(d,metric,d.main,numeric=True)
@@ -757,7 +829,7 @@ def join_on_best_keys(left, right, right_name, left_descriptions=None, right_des
 
 def infer_type(t):
     q=t['objective'].lower()
-    if re.search(r'\b(?:how many|for how many)\b[^?]*\b(?:missing|recorded|not recorded)\b',q):
+    if re.search(r'\b(?:how many|for how many)\b[^?]*\b(?:missing|not recorded|no recorded|(?:have|has|with) (?:a |an |the )?recorded)\b',q):
         return 'table.stat'
     files=t.get('files',{})
     names=list(files) if isinstance(files,dict) else [os.path.basename(str(name)) for name in files]
@@ -769,6 +841,8 @@ def infer_type(t):
     if re.search(r'\b(for each|rank the|group the|by each)\b',q):return 'table.group'
     if re.search(r'\b(consider the|divided by|ratio|per person|per item|per day|per kilometre)\b',q):return 'table.derive'
     if re.search(r'\b(among the|whose|that have|with a|with an|listed before|shipped after|born in)\b',q):return 'table.filter'
+    if re.search(r'\b(?:of|over) the \w+ of the \w+',q):return 'table.filter'
+    if re.search(r'\b(?:of|over|among) the \w+ '+DATE_VERB+r' '+DATE_CMP+r'\b|\bhow many \w+ '+DATE_VERB+r' '+DATE_CMP+r'\b',q):return 'table.filter'
     return 'table.stat'
 
 
@@ -846,8 +920,8 @@ def guard_unparsed_semantics(task, data, typ):
 
 _FULL_DATE = r'(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+[a-z]+\s+\d{4}|[a-z]+\s+\d{1,2},?\s+\d{4})'
 DATE_RESTRICTION = re.compile(
-    r'\b(?:of|for|among|over) (?:all )?the [a-z]+s\s+(?P<part>(?:(?:dated|recorded|made|placed|registered)\s+)?'
-    r'(?:(?:in|during) (?P<year>(?:19|20)\d\d)\b|(?P<cmp>on or after|on or before|after|before|since|until) (?P<date>' + _FULL_DATE + r')))')
+    r'\b(?:of|for|among|over) (?:all )?the [a-z]+s\s+(?P<part>(?:(?P<verb>' + DATE_VERB + r')\s+)?'
+    r'(?:(?:in|during) (?P<year>(?:19|20)\d\d)\b|(?:in|during) (?P<month>[a-z]+ (?:19|20)\d\d)\b|(?P<cmp>on or after|on or before|after|before|since|until) (?P<date>' + _FULL_DATE + r')))')
 
 def question_sentence(text):
     # get the sentence that holds the question
@@ -861,27 +935,34 @@ def apply_date_restriction(d):
     if not m:
         return
     frame = d.tables[d.main]
-    parsed = {c: date_column(frame, c, d.q) for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c])}
-    parsed = {c: s for c, s in parsed.items() if s.notna().sum() >= 0.8 * frame[c].notna().sum() > 0}
-    if len(parsed) > 1:
-        parsed = {c: s for c, s in parsed.items() if re.search(r'\bdate\b|\bday\b', d.map.get(d.main, {}).get(c, ''))}
-    if len(parsed) == 1:
-         _, dates = next(iter(parsed.items()))    
-    else: 
+    if m['verb']:
         try:
-            col = resolve_column(d, 'date', date=True)
+            col = pick_date_column(d, m['verb'])
         except ValueError:
             return
-        dates = date_column(frame, col, d.q)                  
-    if m['year']:
-        mask = dates.dt.year == int(m['year'])
+        dates = date_column(frame, col, d.q)
     else:
-        ref = pd.to_datetime(m['date'], errors='coerce')
-        if pd.isna(ref):
-            return
-        mask = {'after': dates > ref, 'before': dates < ref, 'on or after': dates >= ref, 'since': dates >= ref,
-                'on or before': dates <= ref, 'until': dates <= ref}[m['cmp']]
-
+        parsed = {c: date_column(frame, c, d.q) for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c])}
+        parsed = {c: s for c, s in parsed.items() if s.notna().sum() >= 0.8 * frame[c].notna().sum() > 0}
+        if len(parsed) > 1:
+            parsed = {c: s for c, s in parsed.items() if re.search(r'\bdate\b|\bday\b', d.map.get(d.main, {}).get(c, ''))}
+        if len(parsed) == 1:
+                _, dates = next(iter(parsed.items()))    
+        else: 
+            try:
+                col = resolve_column(d, 'date', date=True)
+            except ValueError:
+                return
+            dates = date_column(frame, col, d.q)                  
+    try:
+        if m['year']:
+            mask = date_mask(dates, 'in', m['year'])
+        elif m['month']:
+            mask = date_mask(dates, 'in', m['month'])
+        else:
+            mask = date_mask(dates, m['cmp'], m['date'])
+    except ValueError:
+        return
     d.tables[d.main] = frame[mask.fillna(False)]
     d.filters_used += 1
     d.date_filtered = True
@@ -903,8 +984,112 @@ def unused_category_labels(d):
                     if not any(label in u or u in label or u==code for u in USED_VALUES):bad.append(label)
     return bad
 
+AGG = r'(mean|average|total|median|maximum|minimum|sum)'
+TAIL = r'\s*(?:\(in [^)]*\))?\s*\??$'
+
+def group_values(d, measure, group, how):
+    if re.search(r"\b(?:with|whose|that|where|between|and)\b|\d", measure + ' ' + group):
+        return None 
+    df = source_frame(d)                                        
+    mcol = resolve_column(d, measure, numeric=True)
+    gcol = resolve_column(d, re.sub(r's$', '', group.strip()), numeric=False)
+    if df[gcol].nunique() > min(50, 0.5 * len(df)):
+        return None                                          
+    vals = numeric_values(d, df, mcol)
+    g = vals.groupby(df[gcol]).agg(lambda x: aggregate_values(x, how))
+    return g.dropna()
+
+def category_rows(d, df, text):
+    for col, desc in d.map.get(d.main, {}).items():
+        if col in df.columns and 'coded (' in desc:
+            try:
+                m = category_mask(df, col, text, desc)
+                if m.fillna(False).any():
+                    return m.fillna(False)
+            except ValueError:
+                pass
+    return None
+
+def generic_compare(d):
+    q = question_sentence(d.lower)
+    m = re.search(r'what is the (second|third)[ -](largest|smallest) ' + AGG + r' (.+?) (?:among|across|of|over|between) (?:all )?(?:the )?([a-z ]+?)' + TAIL, q)
+    if m:
+        g = group_values(d, m[4], m[5], m[3])
+        if g is None or len(g) < 3:
+            return None
+        k = {'second': 1, 'third': 2}[m[1]]
+        return float(g.sort_values(ascending=(m[2] == 'smallest')).iloc[k])
+    m = re.search(r'what is the difference between the (largest|smallest) and (?:the )?(largest|smallest) ' + AGG + r' (.+?) (?:among|across|of|over|between) (?:all )?(?:the )?([a-z ]+?)' + TAIL, q)
+    if m and m[1] != m[2]:
+        g = group_values(d, m[4], m[5], m[3])
+        if g is None or len(g) < 2:
+            return None
+        return float(g.max() - g.min()) if m[1] == 'largest' else float(g.min() - g.max())
+    m = (re.search(r'what is the ' + AGG + r' (.+?) of (?:the )?(.+?) minus the ' + AGG + r' (.+?) of (?:the )?(.+?)' + TAIL, q)
+         or re.search(r'what is the difference between the ' + AGG + r' (.+?) of (?:the )?(.+?) and the ' + AGG + r' (.+?) of (?:the )?(.+?)' + TAIL, q))
+    if m and m[1] == m[4] and m[2] == m[5]:
+        if re.search(r"\b(?:with|whose|that|where)\b|\d", m[2]):
+            return None
+        df = source_frame(d)
+        col = resolve_column(d, m[2], numeric=True)
+        a, b = category_rows(d, df, m[3]), category_rows(d, df, m[6])
+        if a is None or b is None:
+            return None
+        d.filters_used += 1
+        vals = numeric_values(d, df, col)
+        return aggregate_values(vals[a], m[1]) - aggregate_values(vals[b], m[4])
+    return None
+
+def generic_count(d):
+    q = question_sentence(d.lower)
+    if re.search(r'missing|not recorded|no recorded|distinct|different|percentage|fraction|per |each|average|mean', q):
+        return None
+    m = re.search(r"how many ([a-z]+?) (?:are there )?(?:have|has|with|whose|that)\s+(.+?)(?:\s+are there)?\s*\??$", q)
+    if not m or 'at least one' in m[2]:
+        return None
+    noun = m[1].rstrip('s')                                 
+    if any(desc.startswith(noun) for desc in d.map.get(d.main, {}).values() if 'coded (' in desc):
+        return None
+    cond = re.sub(r"\s+of\s+(['\"])", r" is \1", m[2])        
+    df = source_frame(d)
+    mask = filter_mask(d, df, cond)
+    return float(pd.Series(mask).fillna(False).astype(bool).sum())
+
+def solve_new_patterns(t, strict=True):
+    #checking out the added deterministic paths (counting and comparisons)
+    USED_VALUES.clear()
+    task = {**t, 'objective': normalize_question(t['objective'])}
+    task['type'] = task.get('type') or infer_type(task)
+    if not task['type'].startswith('table.') or task['type'] == 'table.join':
+        return None
+    data = Data(task)
+    apply_date_restriction(data)
+    for fn in (generic_compare, generic_count):
+        try:
+            result = fn(data)
+        except (ValueError, KeyError):
+            result = None
+        if result is None or not np.isfinite(result):
+            continue
+        q = question_sentence(data.lower)
+        if strict and not data.date_filtered and re.search(r'\b(?:in|during|after|before|since|until)\s+(?:\d{1,2}\s+[a-z]+\s+|[a-z]+\s+\d{1,2},?\s+|[a-z]+\s+)?(?:19|20)\d\d\b', q):
+            return None
+        if strict and unused_category_labels(data):
+            return None
+        return result
+    return None
 
 def solve_data(t, strict=True):
+    #if solve_data fails, then other deterministic ways are tried
+    try:
+        return solve_data_old(t, strict)
+    except Exception:
+        result = solve_new_patterns(t, strict)
+        if result is None:
+            raise
+        return result
+
+def solve_data_old(t, strict=True):
     # Infer the operation after standardizing wording, not before.
     USED_VALUES.clear()
     task = {**t, 'objective': normalize_question(t['objective'])}
@@ -926,7 +1111,7 @@ def solve_data(t, strict=True):
             raise ValueError('Unapplied subset restriction')
         if re.search(r'\b(?:strictly greater than|strictly less than|at least|at most)\s+-?\d', q):
             raise ValueError('Unapplied numeric filter')
-        if re.search(r'\b(?:in|during|after|before|since|until)\s+(?:\d{1,2}\s+[a-z]+\s+|[a-z]+\s+\d{1,2},?\s+)?(?:19|20)\d\d\b', question_sentence(q)):
+        if re.search(r'\b(?:in|during|after|before|since|until)\s+(?:\d{1,2}\s+[a-z]+\s+|[a-z]+\s+\d{1,2},?\s+|[a-z]+\s+)?(?:19|20)\d\d\b', question_sentence(q)):
             raise ValueError('Unapplied date restriction')
         bad = unused_category_labels(data)          
         if bad:
