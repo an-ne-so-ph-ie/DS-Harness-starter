@@ -89,7 +89,7 @@ reg_sentence_pattern = re.compile(
 
 condition_pattern = re.compile(
     rf"(?:with an? |whose )(?P<col>.+?) (?:(?:of|is) (?P<year>\d{{4}}) or (?P<dir>earlier|later)"
-    rf"|(?:of |is )?'(?P<word>[^']+)'|(?:of |is )?(?P<op>{comp_operators_pattern}) (?P<num>-?\d+(?:\.\d+)?))", re.I) #check for comparison
+    rf"|(?:of |is )?'(?P<word>[^']+)'|(?:of |is )?(?P<op>{comp_operators_pattern}) (?P<num>-?\d+(?:\.\d+)?)(?:\s*(?:%|[a-z°€£$]+(?:\s+[a-z]+){{0,3}}))?)", re.I) #check for comparison
 
 question_patterns = [
     ('r2', r'\bR(?:Â?²|\^?2)\b|coefficient of determination|r-squared'), #R², RÂ², R^2, R2, coefficient of determination and r-squared
@@ -104,7 +104,16 @@ def stems(text):
     # in lower letters, erase stuff in brackets, ignores the ignore_words, seperate in words
     return frozenset(w[:5] for w in re.findall(r'[a-z0-9]+', re.sub(r'\(.*?\)', ' ', text.lower())) if w not in to_ignore_words)
  
- 
+SYNONYMS = {'occupancy': 'people present occupants', 'occupants': 'people present', 'churn': 'left churned', 'default': 'default',
+            'readmission': 'readmitted', 'readmitted': 'readmission', 'income': 'income salary earnings', 'charges': 'charges bill fee',
+            'area': 'area surface', 'surface': 'surface area', 'rent': 'rent', 'tenure': 'tenure months as customer seniority', 'procedures': 'procedures acts', 'usage': 'usage used consumption',
+            'age': 'age', 'duration': 'duration length term', 'length': 'length duration', 'amount': 'amount sum', 'distance': 'distance',
+            'temperature': 'temperature', 'use': 'used use consumption', 'consumption': 'used use consumption'}
+def expanded_stems(text):
+    words = re.findall(r'[a-z0-9]+', re.sub(r'\(.*?\)', ' ', text.lower()))
+    extra = ' '.join(SYNONYMS.get(w, '') for w in words)
+    return stems(text) | stems(extra)
+
 def condition(text):
     text = text.strip(' ,.;')
     if not text:
@@ -169,8 +178,9 @@ def solve_fit_task(task, model_suggested_columns=None):
     def describe(name, df):
         # look for id column (or take first one) and get description and returns only allowed columns
         desc = {c: entries.get((name, c), c) for c in df.columns}
-        named = [c for c, x in desc.items() if re.search(r'\bidentifier\b|\bid\b', x, re.I)]
-        idc = named[0] if len(named) == 1 else df.columns[0]
+        named = [c for c, x in desc.items() if re.search(r'\bidentifier\b|\bid\b|\bnumber$', x.strip(), re.I)]
+        named = [c for c in named if df[c].nunique() >= 0.5 * len(df)] or named
+        idc = max(named, key=lambda c: (df[c].nunique(), bool(re.search(r'\bidentifier\b|\bid\b', desc[c], re.I)))) if named else df.columns[0]
         leak = {stems(x) for x in spec['leak']}
         allowed = {c: stems(x) for c, x in desc.items() if c != idc and stems(x) not in leak}
         return desc, idc, allowed
@@ -199,7 +209,9 @@ def solve_fit_task(task, model_suggested_columns=None):
                     if not p:
                         continue
                     head = stems(re.sub(r'\(.*?\)', ' ', ph).split()[-1])   # last word counts as the main noun for unclear cases
-                    scored = sorted(((score(p, head, s), c) for c, s in free.items()), reverse=True)
+                    p2 = expanded_stems(ph)
+                    best_of = lambda s: max(score(p, head, s), score(p2, head, s)) if p2 != p and not (p & s) else score(p, head, s)
+                    scored = sorted(((best_of(s), c) for c, s in free.items()), reverse=True)
                     if scored and (scored[0][0][0] or scored[0][0][1] >= threshold) and \
                             (len(scored) == 1 or scored[1][0] < scored[0][0]):   # unique first place is necessary
                         best.append((scored[0][0], ph, scored[0][1]))
